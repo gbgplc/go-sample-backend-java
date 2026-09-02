@@ -1,0 +1,15 @@
+server:
+  port: 8082
+
+app:
+  market: meridian-health
+  brand: Meridian Health
+  mark: M
+  tagline: Patient record registration
+  accent: "#219C4C"
+  accent-soft: "#C7EBD5"
+  help-line: "Reception can verify you in person with the same documents."
+  journey-name: Patient record access
+  resource-id: jny_patient_record_v3@latest
+  cors-allowed-origins:
+    - http://localhost:3001

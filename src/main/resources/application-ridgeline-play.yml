@@ -1,0 +1,15 @@
+server:
+  port: 8083
+
+app:
+  market: ridgeline-play
+  brand: Ridgeline Play
+  mark: R
+  tagline: Account sign-up and age gate
+  accent: "#CC6133"
+  accent-soft: "#FFEDE5"
+  help-line: "Live chat is open 24 hours. Safer gambling tools are in Account."
+  journey-name: GB player onboarding
+  resource-id: jny_gb_player_kyc@latest
+  cors-allowed-origins:
+    - http://localhost:3002

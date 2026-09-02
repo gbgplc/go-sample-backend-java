@@ -1,0 +1,15 @@
+server:
+  port: 8081
+
+app:
+  market: northbank
+  brand: Northbank
+  mark: N
+  tagline: Current account opening, UK
+  accent: "#4D4DFF"
+  accent-soft: "#F5F5FC"
+  help-line: "Call 0800 000 000, or carry on in a branch with the same reference."
+  journey-name: UK retail account opening
+  resource-id: jny_uk_retail_cdd@latest
+  cors-allowed-origins:
+    - http://localhost:3000
