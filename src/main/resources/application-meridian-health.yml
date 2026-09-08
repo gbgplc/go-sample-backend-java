@@ -10,6 +10,24 @@ app:
   accent-soft: "#C7EBD5"
   help-line: "Reception can verify you in person with the same documents."
   journey-name: Patient record access
-  resource-id: jny_patient_record_v3@latest
+  # Published to Preview on the gbggo4-demo tenant, 2026-09-07. Pinned to an
+  # exact version rather than @latest: @latest costs a Journey-builder lookup
+  # on every start and doesn't pick up a publish predictably.
+  resource-id: b3d149562ec927dedcd76f3a6b7b0f82bbf7de818aebad3b3f7baa4c14940b6b@2g6no1nz
   cors-allowed-origins:
     - http://localhost:3001
+
+# The gbggo4-demo nonprod tenant. Still inert unless go.mode=live — set that,
+# and the four credentials below, in an untracked .env or via env vars.
+#
+# Note the two hosts differ: the Keycloak realm has no region segment, the API
+# host does (-eu). That is not a typo.
+go:
+  auth-url: https://gbggo4-demo.nonprod.fabric.gbgplatforms.com/auth/realms/go/protocol/openid-connect/token
+  base-url: https://gbggo4-demo-eu.nonprod.fabric.gbgplatforms.com/v2/captain/
+  grant-type: password
+  scope: openid
+  client-id: ${GBG_CLIENT_ID:}
+  client-secret: ${GBG_CLIENT_SECRET:}
+  username: ${GBG_USERNAME:}
+  password: ${GBG_PASSWORD:}

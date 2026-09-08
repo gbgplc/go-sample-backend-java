@@ -134,11 +134,12 @@ auth genuinely works, but it doesn't match the above:
   (a Keycloak realm, not `api.auth.gbgplc.com`)
 - Grant type: **`password`**, not `client_credentials` — needs `client_id`,
   `client_secret`, `username`, and `password` all four
-- Confirmed working combination: `client_id` = `flow-api-test`, `username` =
-  `flow-api-test` (same value, both fields), plus a client secret and
-  password — **see your secrets manager / whoever shared these with you, not
-  this file** (they were shared over chat during testing and should be
-  treated as exposed — rotate if that channel isn't tightly controlled).
+- Confirmed working combination: `client_id` and `username` take the **same
+  value** (easy to miss — it looks like a copy/paste error but isn't), plus a
+  client secret and password — **all four come from your secrets manager /
+  whoever administers the tenant, not this file** (they were shared over chat
+  during testing and should be treated as exposed — rotate if that channel
+  isn't tightly controlled).
 - **`GoTokenService` does not support the `password` grant yet.** Using this
   environment for real needs a code change first: a configurable grant type,
   and `username`/`password` fields on `GoProperties`.

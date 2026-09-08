@@ -163,7 +163,11 @@ public class SessionController {
             @RequestPart("file") MultipartFile file,
             HttpServletRequest request
     ) {
-        return sessionService.uploadAttachment(sessionId, cookieFrom(request), file.getOriginalFilename());
+        try {
+            return sessionService.uploadAttachment(sessionId, cookieFrom(request), file.getBytes());
+        } catch (java.io.IOException e) {
+            throw OnboardingException.validationFailed("That image could not be read. Try again.", null);
+        }
     }
 
     @Operation(summary = "Per-app presentation configuration",

@@ -13,6 +13,7 @@ import com.gbg.samples.onboarding.go.GoClient;
 import com.gbg.samples.onboarding.go.GoStartResult;
 import org.springframework.stereotype.Service;
 
+import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
 
@@ -59,7 +60,7 @@ public class SessionService {
     public SubmitInteractionResponse submitInteraction(String sessionId, String cookieToken, String interactionId, Map<String, Object> data) {
         Session session = authorize(sessionId, cookieToken);
 
-        if (session.isRetryOf(interactionId)) {
+        if (session.isRetryOf(interactionId, data)) {
             return session.cachedResponse();
         }
         if (session.currentInteractionId() != null && !session.currentInteractionId().equals(interactionId)) {
@@ -67,7 +68,7 @@ public class SessionService {
         }
 
         SubmitInteractionResponse response = goClient.submitInteraction(session.goInstanceId(), interactionId, data);
-        session.recordAdvance(interactionId, response);
+        session.recordAdvance(interactionId, data, response);
         return response;
     }
 
@@ -81,13 +82,28 @@ public class SessionService {
         return goClient.fetchRecord(session.goInstanceId());
     }
 
-    public AttachmentResponse uploadAttachment(String sessionId, String cookieToken, String originalFilename) {
+    /**
+     * Returns the captured image as base64, which the front end then submits
+     * verbatim as its {@code attachmentRef}.
+     *
+     * Go has no attachment-upload endpoint to proxy to: document and selfie
+     * images travel inside the interaction submission itself, base64-encoded
+     * under {@code context.subject.documents[]} and
+     * {@code context.subject.biometrics[]}. So "upload" here is an encode, and
+     * the reference the front end holds onto <em>is</em> the payload —
+     * {@code GoInteractionSubmitRequest} places it at the right schema path
+     * when the capture screen submits.
+     *
+     * This previously synthesised an opaque reference and dropped the bytes,
+     * which left the capture screens unable to complete against a live journey:
+     * Go was sent a made-up string where it expected an image.
+     */
+    public AttachmentResponse uploadAttachment(String sessionId, String cookieToken, byte[] content) {
         authorize(sessionId, cookieToken);
-        // Document/selfie capture stays a placeholder until a capture SDK is
-        // chosen (front-end handoff, section 6) — this synthesises a reference
-        // rather than proxying to a real Go attachments endpoint.
-        String safeName = originalFilename == null ? "file" : originalFilename;
-        return new AttachmentResponse("attachment_" + sessionId + "_" + UUID.randomUUID() + "_" + safeName);
+        if (content == null || content.length == 0) {
+            throw OnboardingException.validationFailed("That image could not be read. Try again.", null);
+        }
+        return new AttachmentResponse(Base64.getEncoder().encodeToString(content));
     }
 
     public AppConfigResponse getConfig() {

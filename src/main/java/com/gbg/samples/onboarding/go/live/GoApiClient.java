@@ -90,10 +90,11 @@ public class GoApiClient implements GoClient {
 
     @Override
     public SubmitInteractionResponse submitInteraction(String instanceId, String interactionId, Map<String, Object> data) {
+        Map<String, Object> payload = resolveAttachment(instanceId, data);
         call(() -> client.post()
                 .uri("journey/interaction/submit")
                 .header("Authorization", "Bearer " + tokenService.accessToken())
-                .body(GoInteractionSubmitRequest.of(instanceId, interactionId, data))
+                .body(GoInteractionSubmitRequest.of(instanceId, interactionId, payload))
                 .retrieve()
                 .toBodilessEntity());
         // The submit response only acknowledges receipt; the next screen comes
@@ -104,7 +105,11 @@ public class GoApiClient implements GoClient {
     @Override
     public StateResponse fetchState(String instanceId) {
         GoStateResponse response = fetchGoState(instanceId);
+        // A Failed journey is terminal. Reporting IN_PROGRESS would leave the
+        // front end's processing screen polling an instance that will never
+        // advance, so it reports COMPLETED — the decision it carries is `fail`.
         JourneyStatus status = "Completed".equalsIgnoreCase(response.status())
+                || DefaultInteractionMapper.isFailed(response.status())
                 ? JourneyStatus.COMPLETED
                 : JourneyStatus.IN_PROGRESS;
         RecordResponse asRecord = mapper.toRecord(response);
@@ -129,10 +134,58 @@ public class GoApiClient implements GoClient {
         return response;
     }
 
+    /**
+     * A result screen is terminal because it carries a decision, not because
+     * the mapper happened to attach a summary. The mock client keys off a
+     * non-empty summary instead, but it authors both halves of its own
+     * fixtures; here the summary is composed from whatever Go returned and is
+     * legitimately empty on a failed journey, which must still read as
+     * terminal rather than parking the customer on a dead screen.
+     */
+    /**
+     * Rewrites the front end's capture submission into a field the submit
+     * mapping recognises.
+     *
+     * The capture screen posts {@code {attachmentRef: <base64>}} for both a
+     * document and a selfie — the two screens are the same component, so the
+     * payload is identical and the key alone can't say which is which. Go
+     * needs them in different places ({@code subject.documents[].side1Image}
+     * versus {@code subject.biometrics[].selfieImage}), so the distinction has
+     * to come from the journey's own state: whichever image element is still
+     * outstanding is the one being answered.
+     */
+    private Map<String, Object> resolveAttachment(String instanceId, Map<String, Object> data) {
+        Object ref = data == null ? null : data.get("attachmentRef");
+        if (ref == null) return data;
+
+        // Ask Go directly what is still missing rather than reading the screen
+        // we just rendered: `outstanding` is the live answer, and it is what
+        // the front end's own next screen was derived from anyway. Document
+        // first, matching MeridianScreenPlan's order, so the two agree about
+        // which capture is being answered.
+        List<String> outstanding = fetchOutstanding(instanceId);
+        boolean document = outstanding.stream().anyMatch(o -> o.startsWith("PrimaryDocument/"));
+
+        Map<String, Object> rewritten = new java.util.LinkedHashMap<>(data);
+        rewritten.remove("attachmentRef");
+        rewritten.put(document ? "documentImage" : "selfieImage", ref);
+        return rewritten;
+    }
+
+    private List<String> fetchOutstanding(String instanceId) {
+        GoInteractionFetchResponse response = call(() -> client.post()
+                .uri("journey/interaction/fetch")
+                .header("Authorization", "Bearer " + tokenService.accessToken())
+                .body(new GoInstanceRequest(instanceId))
+                .retrieve()
+                .body(GoInteractionFetchResponse.class));
+        return response == null || response.outstanding() == null ? List.of() : response.outstanding();
+    }
+
     private static JourneyStatus statusFrom(Interaction interaction) {
         return switch (interaction.kind()) {
             case PROCESSING -> JourneyStatus.IN_PROGRESS;
-            case RESULT -> interaction.summary() != null && !interaction.summary().isEmpty()
+            case RESULT -> interaction.decision() != null
                     ? JourneyStatus.COMPLETED
                     : JourneyStatus.PENDING_INPUT;
             default -> JourneyStatus.PENDING_INPUT;

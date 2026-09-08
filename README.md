@@ -43,32 +43,78 @@ the three front-end apps one-to-one.
 
 ## Running
 
+Needs **JDK 21** and Maven. JDK 23 also builds and runs cleanly (verified
+2026-09-08). The `oracleJdk-26.jdk` folder some checkouts carry is too new
+for the Lombok version this build pins, and fails with symbol-not-found
+errors across the mock package.
+
+```
+./run.sh                        # meridian-health, live  (the default)
+./run.sh northbank mock         # any market, either mode
+```
+
+`run.sh` finds JDK 21, sources `.env.local`, and runs the right profile. The
+long form still works if you prefer it:
+
 ```
 mvn spring-boot:run -Dspring-boot.run.profiles=northbank         # :8081
 mvn spring-boot:run -Dspring-boot.run.profiles=meridian-health    # :8082
 mvn spring-boot:run -Dspring-boot.run.profiles=ridgeline-play     # :8083
 ```
 
-Defaults to `go.mode=mock`, so each starts up with no credentials and no
-network dependency. Point a front-end app at one with:
-
-```
-NEXT_PUBLIC_ONBOARDING_TRANSPORT=rest
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8081
-```
+Mock mode needs no credentials and no network. Point a front-end app at an
+instance by copying `apps/<market>/.env.example` to `.env.local` in the
+front-end repo — the ports pair up 3000/8081, 3001/8082, 3002/8083, and each
+backend's CORS config allows exactly its own.
 
 `?mock_scenario=<id>` on `POST /v1/sessions` (i.e. the same query param the
 front end already appends to its own URL) reaches every designed outcome,
 exactly as it does against the TypeScript mock.
 
-To run against real GBG Go:
+## Running against real GBG Go
 
-```
-go.mode=live
-GBG_CLIENT_ID=...
-GBG_CLIENT_SECRET=...
-go.region=eu   # or us / au
-```
+Copy `.env.example` to `.env.local`, fill in the four values, then
+`./run.sh <market>`. Never commit that file; it is gitignored.
+
+Only **Meridian Health** has a published journey. Northbank and Ridgeline
+still carry placeholder resource IDs and will fail at journey start in live
+mode until journeys exist for them.
+
+### Two tenant shapes
+
+The public documented platform and the nonprod *fabric* tenants disagree on
+both auth and host layout, so `GoProperties` makes both configurable:
+
+| | Public platform | `gbggo4-demo` (fabric nonprod) |
+| --- | --- | --- |
+| Token host | `api.auth.gbgplc.com` (PingFederate) | a Keycloak realm, no region segment |
+| Grant | `client_credentials` + `scope=gbg.token` | `password` — id, secret, username **and** password |
+| API host | `{region}.platform.go.gbgplc.com` | `gbggo4-demo-eu.…` — region in the tenant name |
+| Token TTL | 3600s | 300s |
+
+The token host having no region while the API host does is real, not a typo.
+`go.base-url` can therefore be set outright rather than composed from
+`go.region`.
+
+Meridian's settings live in `application-meridian-health.yml`. Moving to a
+different tenant means changing `auth-url`, `base-url`, `grant-type` and
+`resource-id` — journey IDs are per-tenant, so ours will not exist on yours.
+
+### Known issue: Data Verification
+
+The Meridian journey has no Data Verification module, so no name, date of
+birth or address is collected — document, selfie and consent only.
+
+It was removed after it proved unusable on this tenant: the module declares
+`FullName` as a required input and reports it "Not connected", the interaction
+group will not offer `FullName` or `DateOfBirth` to add, and prefilling them in
+`context.subject.identity` at journey start is silently discarded — the fetch
+response returns an empty context. Reproduced across five publishes and two
+separate journeys; every other module wires up correctly.
+
+This needs raising with GBG rather than working around. The identity and
+address mappings are still in `GoInteractionSubmitRequest`, so restoring the
+module needs no code change here.
 
 ## API docs
 

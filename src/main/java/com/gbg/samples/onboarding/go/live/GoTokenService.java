@@ -15,9 +15,24 @@ import org.springframework.web.client.RestClient;
 import java.time.Instant;
 
 /**
- * Exchanges the Go client credentials for a Bearer token (POST
- * /as/token.oauth2, client_credentials grant) and caches it until shortly
- * before it expires. This is the one place {@code go.client-secret} is read.
+ * Exchanges the Go client credentials for a Bearer token and caches it until
+ * shortly before it expires. This is the one place {@code go.client-secret}
+ * (and, under the password grant, {@code go.password}) is read.
+ *
+ * Two grants are supported, selected by {@code go.grant-type}:
+ * <ul>
+ *   <li>{@code client_credentials} — the documented public platform. Sends
+ *       client id, secret and {@code scope=gbg.token} to PingFederate.</li>
+ *   <li>{@code password} — the fabric nonprod tenants, which front Keycloak.
+ *       Sends client id, secret, username and password. The scope is passed
+ *       through as configured ({@code openid} on the realms seen so far);
+ *       {@code gbg.token} is a PingFederate scope and is not valid there.</li>
+ * </ul>
+ *
+ * Keycloak realms tend to issue short-lived tokens — 300 seconds on
+ * {@code gbggo4-demo} versus the documented platform's 3600 — so the cache
+ * turns over far more often under the password grant. The refresh margin
+ * below is deliberately small enough to stay useful at that TTL.
  */
 @Component
 @ConditionalOnProperty(prefix = "go", name = "mode", havingValue = "live")
@@ -46,10 +61,14 @@ public class GoTokenService {
 
     private String mintToken() {
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
-        form.add("grant_type", "client_credentials");
+        form.add("grant_type", properties.grantType());
         form.add("client_id", properties.clientId());
         form.add("client_secret", properties.clientSecret());
         form.add("scope", properties.scope());
+        if (properties.passwordGrant()) {
+            form.add("username", properties.username());
+            form.add("password", properties.password());
+        }
 
         try {
             GoTokenResponse response = authClient.post()

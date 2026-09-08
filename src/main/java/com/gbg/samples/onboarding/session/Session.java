@@ -22,6 +22,8 @@ public final class Session {
 
     private volatile String currentInteractionId;
     private volatile String lastSubmittedInteractionId;
+    /** The payload of the last submit — see {@link #isRetryOf}. */
+    private volatile java.util.Map<String, Object> lastSubmittedData;
     private volatile SubmitInteractionResponse lastSubmittedResponse;
     private volatile Instant lastAccessedAt;
 
@@ -62,15 +64,40 @@ public final class Session {
         return currentInteractionId;
     }
 
-    /** Records a successful advance so a retried submit of the same interactionId can be answered from cache. */
-    public void recordAdvance(String submittedInteractionId, SubmitInteractionResponse response) {
+    /** Records a successful advance so a retried submit of the same step can be answered from cache. */
+    public void recordAdvance(String submittedInteractionId, java.util.Map<String, Object> submittedData,
+                              SubmitInteractionResponse response) {
         this.lastSubmittedInteractionId = submittedInteractionId;
+        this.lastSubmittedData = submittedData;
         this.lastSubmittedResponse = response;
         this.currentInteractionId = response.interaction() == null ? null : response.interaction().interactionId();
     }
 
-    public boolean isRetryOf(String interactionId) {
-        return lastSubmittedInteractionId != null && lastSubmittedInteractionId.equals(interactionId);
+    /**
+     * Whether this submit repeats the one just made.
+     *
+     * The interactionId alone cannot answer that against a live Go journey.
+     * Go returns a single interaction — {@code segment1@latest} — for the whole
+     * data-collection phase, and the id stays byte-identical from the first
+     * screen to the last, so keying on it alone makes every step after the
+     * first look like a retry of the one before and replays a stale cached
+     * response instead of submitting. (Against the mock the ids differ per
+     * step, which is why this only shows up live.)
+     *
+     * The stage the customer is being shown is what actually moves, so a true
+     * retry is the same interactionId <em>and</em> the same stage still
+     * standing. That keeps the double-submit protection the guard exists for
+     * while letting a real advance through.
+     */
+    public boolean isRetryOf(String interactionId, java.util.Map<String, Object> data) {
+        if (lastSubmittedInteractionId == null || !lastSubmittedInteractionId.equals(interactionId)) {
+            return false;
+        }
+        // Same id and the same payload: a genuine double-submit — a
+        // double-tapped button or a retried request. Same id with different
+        // data is the next step, because Go reuses one interactionId for the
+        // whole collection phase.
+        return java.util.Objects.equals(lastSubmittedData, data);
     }
 
     public SubmitInteractionResponse cachedResponse() {

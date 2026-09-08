@@ -4,3 +4,15 @@ target/
 *.iml
 .vscode/
 .mvn/wrapper/maven-wrapper.jar
+
+# Local-only: JDK unzipped into the project folder, not project code
+oracleJdk-26.jdk/
+.DS_Store
+
+# Credentials. application-*.yml reads these from the environment precisely so
+# they never land in a tracked file — keep it that way. .env.example is the
+# exception: it lists the variable names with no values, and is committed so
+# a new checkout knows what to fill in.
+.env
+.env.*
+!.env.example
