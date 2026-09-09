@@ -44,7 +44,8 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
      * {@code subject.<key>} placement — wrong for a real journey, but visible
      * and debuggable rather than silently dropped.
      */
-    public static GoInteractionSubmitRequest of(String instanceId, String interactionId, Map<String, Object> data) {
+    public static GoInteractionSubmitRequest of(String instanceId, String interactionId, Map<String, Object> data,
+                                                 String consentUrl) {
         if (data == null || data.isEmpty()) {
             return new GoInteractionSubmitRequest(instanceId, interactionId, List.of(), new Context(Map.of()));
         }
@@ -58,7 +59,7 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
         // don't also fall through to the generic mapping.
         if (data.keySet().stream().anyMatch(CONSENT_KEYS::contains)) {
             participants.add(new Participant("Consent"));
-            subject.put("consent", List.of(consentRecord(data)));
+            subject.put("consent", List.of(consentRecord(data, consentUrl)));
         }
 
         data.forEach((key, value) -> {
@@ -80,18 +81,10 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
     private static final List<String> CONSENT_KEYS =
             List.of("shareWithClinicians", "sharePrescriptions", "useForResearch");
 
-    /**
-     * Where the agreement wording lives. Must be a real, stable URL: Go stores
-     * it so the exact terms consented to can be retrieved later, which is the
-     * whole point of an auditable consent record. Override per deployment.
-     */
-    private static final String CONSENT_URL =
-            System.getProperty("app.consent-url", "https://meridianhealth.example/consent/record-access-v1");
-
-    private static Map<String, Object> consentRecord(Map<String, Object> data) {
+    private static Map<String, Object> consentRecord(Map<String, Object> data, String consentUrl) {
         Map<String, Object> consent = new LinkedHashMap<>();
         consent.put("type", "explicit");
-        consent.put("url", CONSENT_URL);
+        consent.put("url", consentUrl);
         consent.put("terms", "I agree that Meridian Health may access and share my patient record "
                 + "with clinicians treating me.");
         consent.put("effectiveDate", java.time.Instant.now().toString());

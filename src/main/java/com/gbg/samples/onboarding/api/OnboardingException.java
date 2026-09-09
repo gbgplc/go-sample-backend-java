@@ -9,24 +9,15 @@ public class OnboardingException extends RuntimeException {
 
     private final ErrorCode code;
     private final Map<String, String> fields;
-    private final boolean retryableOverride;
-    private final boolean hasRetryableOverride;
 
-    public OnboardingException(ErrorCode code, String message) {
-        this(code, message, null, false, false);
+    private OnboardingException(ErrorCode code, String message) {
+        this(code, message, null);
     }
 
-    public OnboardingException(ErrorCode code, String message, Map<String, String> fields) {
-        this(code, message, fields, false, false);
-    }
-
-    private OnboardingException(ErrorCode code, String message, Map<String, String> fields,
-                                 boolean retryableOverride, boolean hasRetryableOverride) {
+    private OnboardingException(ErrorCode code, String message, Map<String, String> fields) {
         super(message);
         this.code = code;
         this.fields = fields;
-        this.retryableOverride = retryableOverride;
-        this.hasRetryableOverride = hasRetryableOverride;
     }
 
     public static OnboardingException validationFailed(String message, Map<String, String> fields) {
@@ -45,6 +36,10 @@ public class OnboardingException extends RuntimeException {
         return new OnboardingException(ErrorCode.UPSTREAM_UNAVAILABLE, message);
     }
 
+    public static OnboardingException rateLimited(String message) {
+        return new OnboardingException(ErrorCode.RATE_LIMITED, message);
+    }
+
     public ErrorCode code() {
         return code;
     }
@@ -54,6 +49,6 @@ public class OnboardingException extends RuntimeException {
     }
 
     public boolean retryable() {
-        return hasRetryableOverride ? retryableOverride : code.defaultRetryable();
+        return code.defaultRetryable();
     }
 }

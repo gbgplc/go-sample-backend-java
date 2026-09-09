@@ -20,11 +20,11 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseCookie;
+import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -96,8 +96,11 @@ public class SessionController {
     })
     @SecurityRequirement(name = "onboarding_session")
     @GetMapping("/v1/sessions/{id}/interaction")
-    public Interaction getInteraction(@PathVariable("id") String sessionId, HttpServletRequest request) {
-        return sessionService.getInteraction(sessionId, cookieFrom(request));
+    public Interaction getInteraction(
+            @PathVariable("id") String sessionId,
+            @CookieValue(name = "${session.cookie-name}", required = false) String sessionCookie
+    ) {
+        return sessionService.getInteraction(sessionId, sessionCookie);
     }
 
     @Operation(summary = "Submit the current interaction",
@@ -117,9 +120,9 @@ public class SessionController {
     public SubmitInteractionResponse submitInteraction(
             @PathVariable("id") String sessionId,
             @Valid @RequestBody SubmitInteractionRequest request,
-            HttpServletRequest httpRequest
+            @CookieValue(name = "${session.cookie-name}", required = false) String sessionCookie
     ) {
-        return sessionService.submitInteraction(sessionId, cookieFrom(httpRequest), request.interactionId(), request.data());
+        return sessionService.submitInteraction(sessionId, sessionCookie, request.interactionId(), request.data());
     }
 
     @Operation(summary = "Journey status and, once reached, the decision",
@@ -131,8 +134,11 @@ public class SessionController {
     })
     @SecurityRequirement(name = "onboarding_session")
     @GetMapping("/v1/sessions/{id}/state")
-    public StateResponse getState(@PathVariable("id") String sessionId, HttpServletRequest request) {
-        return sessionService.getState(sessionId, cookieFrom(request));
+    public StateResponse getState(
+            @PathVariable("id") String sessionId,
+            @CookieValue(name = "${session.cookie-name}", required = false) String sessionCookie
+    ) {
+        return sessionService.getState(sessionId, sessionCookie);
     }
 
     @Operation(summary = "The verification record for the final screen",
@@ -144,8 +150,11 @@ public class SessionController {
     })
     @SecurityRequirement(name = "onboarding_session")
     @GetMapping("/v1/sessions/{id}/record")
-    public RecordResponse getRecord(@PathVariable("id") String sessionId, HttpServletRequest request) {
-        return sessionService.getRecord(sessionId, cookieFrom(request));
+    public RecordResponse getRecord(
+            @PathVariable("id") String sessionId,
+            @CookieValue(name = "${session.cookie-name}", required = false) String sessionCookie
+    ) {
+        return sessionService.getRecord(sessionId, sessionCookie);
     }
 
     @Operation(summary = "Upload a supplementary document",
@@ -161,10 +170,10 @@ public class SessionController {
     public AttachmentResponse uploadAttachment(
             @PathVariable("id") String sessionId,
             @RequestPart("file") MultipartFile file,
-            HttpServletRequest request
+            @CookieValue(name = "${session.cookie-name}", required = false) String sessionCookie
     ) {
         try {
-            return sessionService.uploadAttachment(sessionId, cookieFrom(request), file.getBytes());
+            return sessionService.uploadAttachment(sessionId, sessionCookie, file.getBytes());
         } catch (java.io.IOException e) {
             throw OnboardingException.validationFailed("That image could not be read. Try again.", null);
         }
@@ -179,17 +188,6 @@ public class SessionController {
     }
 
     // --- cookie plumbing -----------------------------------------------
-
-    private String cookieFrom(HttpServletRequest request) {
-        Cookie[] cookies = request.getCookies();
-        if (cookies == null) return null;
-        for (Cookie cookie : cookies) {
-            if (cookie.getName().equals(sessionProperties.cookieName())) {
-                return cookie.getValue();
-            }
-        }
-        return null;
-    }
 
     /**
      * {@code secure} tracks the incoming request's own scheme rather than

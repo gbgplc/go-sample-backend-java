@@ -21,8 +21,8 @@ import org.springframework.context.annotation.Configuration;
 public class OpenApiConfig {
 
     @Bean
-    public OpenAPI onboardingOpenApi(AppConfigProperties appConfig) {
-        String cookieName = "onboarding_session";
+    public OpenAPI onboardingOpenApi(AppConfigProperties appConfig, SessionProperties sessionProperties) {
+        String cookieName = sessionProperties.cookieName();
         return new OpenAPI()
                 .info(new Info()
                         .title(appConfig.brand() + " — Onboarding Service API")

@@ -10,29 +10,59 @@ import com.gbg.samples.onboarding.api.dto.RecordResponse;
 import com.gbg.samples.onboarding.api.dto.ScreenKind;
 import com.gbg.samples.onboarding.api.dto.StagePlanEntry;
 import com.gbg.samples.onboarding.api.dto.StageState;
+import com.gbg.samples.onboarding.config.ScreenPlanProperties;
 import com.gbg.samples.onboarding.go.live.dto.GoInteractionFetchResponse;
 import com.gbg.samples.onboarding.go.live.dto.GoStateResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Turns Go's raw, domain-element-shaped interaction into the front end's
  * opinionated {@code Interaction} DTO (screen kind, copy, field labels).
  *
- * This is a deliberately generic placeholder, not a finished mapping: Go
- * gives back which domain elements are outstanding, not English copy or a
- * screen kind — those are a product/copy decision per journey (front-end
- * handoff, section 6, "composition of the verification record" makes the
- * same point about the record endpoint). The mock client's fixtures show
- * what a *finished* mapping should read like; this class is the seam where
- * that real mapping — driven by the published journey's actual domain
- * elements, or a copy table keyed by domain element id — plugs in once a
- * journey exists to map against.
+ * Which domain elements become which screen, in what order and with what
+ * copy, is {@link ScreenPlanProperties} — config, not code — so this class
+ * itself has no knowledge of any one market's presentation. Go gives back
+ * which domain elements are outstanding, not English copy or a screen kind;
+ * turning that into screens is a product/copy decision per journey
+ * (front-end handoff, section 6, "composition of the verification record"
+ * makes the same point about the record endpoint), made once in a market's
+ * {@code application-<market>.yml} rather than here.
  */
 @Component
 public class DefaultInteractionMapper {
+
+    private static final Logger log = LoggerFactory.getLogger(DefaultInteractionMapper.class);
+
+    /**
+     * Human labels for domain elements common enough to be worth naming
+     * outright; anything else falls back to a de-camel-cased leaf (see
+     * {@link #label}). These are Go's own generic Data Verification element
+     * names, not any one market's copy, so — unlike the screen plan — they
+     * stay here rather than in per-market config.
+     */
+    private static final Map<String, String> LABELS = Map.ofEntries(
+            Map.entry("FullName/firstName", "First name"),
+            Map.entry("FullName/lastNames", "Last name"),
+            Map.entry("DateOfBirth", "Date of birth"),
+            Map.entry("CurrentAddress/building", "Building name or number"),
+            Map.entry("CurrentAddress/thoroughfare", "Street"),
+            Map.entry("CurrentAddress/locality", "Town or city"),
+            Map.entry("CurrentAddress/postalCode", "Postcode"),
+            Map.entry("CurrentAddress/country", "Country"),
+            Map.entry("MobilePhone/number", "Mobile number")
+    );
+
+    private final ScreenPlanProperties screenPlan;
+
+    public DefaultInteractionMapper(ScreenPlanProperties screenPlan) {
+        this.screenPlan = screenPlan;
+    }
 
     public Interaction toInteraction(GoInteractionFetchResponse response) {
         String goStatus = response.journey() == null ? null : response.journey().status();
@@ -67,42 +97,68 @@ public class DefaultInteractionMapper {
         }
 
         if (status == JourneyStatus.IN_PROGRESS) {
-            return new Interaction(
-                    interactionId, ScreenKind.PROCESSING, "Processing", null, "Running your checks",
-                    "This usually takes a few seconds.", null, null, null, null, null, null, null, null,
-                    null, null, null, null, null, null, null
-            );
+            return processingInteraction(interactionId);
         }
 
         List<String> outstanding = response.outstanding() == null ? List.of() : response.outstanding();
 
+        // Nothing outstanding but not yet Completed: modules are running.
+        if (outstanding.isEmpty()) {
+            return processingInteraction(interactionId);
+        }
+
         // Go returns a single interaction listing everything still outstanding
         // at once; splitting that into screens is the client's job under
-        // `delivery: "api"`. MeridianScreenPlan holds that decision.
-        return MeridianScreenPlan.next(outstanding)
+        // `delivery: "api"`. The configured screen plan holds that decision —
+        // first stage in order whose elements are still outstanding wins.
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claims(outstanding))
+                .findFirst()
                 .map(stage -> toStagedInteraction(interactionId, stage, outstanding))
-                // Nothing outstanding but not yet Completed: modules are running.
-                .orElseGet(() -> new Interaction(
-                        interactionId, ScreenKind.PROCESSING, "Processing", null, "Running your checks",
-                        "This usually takes a few seconds.", null, null, null, null, null, null, null, null,
-                        null, null, null, null, null, null, null
-                ));
+                // The plan doesn't recognise everything that's outstanding (e.g. a
+                // module restored after the plan was written, or no plan configured
+                // at all for this market yet). Falling back to Processing here — as
+                // this used to, indiscriminately — would park the customer on a
+                // screen that can never advance, since nothing will ever satisfy the
+                // elements no stage claims. A plain form is at least usable, and the
+                // warning below is what would tell you to update the plan.
+                .orElseGet(() -> unmappedElementsInteraction(interactionId, outstanding));
+    }
+
+    private Interaction processingInteraction(String interactionId) {
+        return new Interaction(
+                interactionId, ScreenKind.PROCESSING, "Processing", null, "Running your checks",
+                "This usually takes a few seconds.", null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null
+        );
+    }
+
+    private Interaction unmappedElementsInteraction(String interactionId, List<String> outstanding) {
+        log.warn("No screen mapped for outstanding elements {} — falling back to a generic form", outstanding);
+        List<FieldSchema> fields = outstanding.stream()
+                .map(ref -> FieldSchema.of(ref, label(ref), null))
+                .toList();
+        return new Interaction(
+                interactionId, ScreenKind.FORM, "More details", null, "A few more details",
+                "We need a bit more information to continue.", null, "Continue", null, null, null,
+                fields, null, null, null, null, null, null, null, null, null
+        );
     }
 
     /** One screen from the plan, with a rail showing where the customer has got to. */
-    private Interaction toStagedInteraction(String interactionId, MeridianScreenPlan.Stage stage,
+    private Interaction toStagedInteraction(String interactionId, ScreenPlanProperties.Stage stage,
                                             List<String> outstanding) {
         boolean reachedCurrent = false;
         List<StagePlanEntry> rail = new java.util.ArrayList<>();
-        for (String label : MeridianScreenPlan.stageLabels()) {
+        for (ScreenPlanProperties.Stage planStage : screenPlan.stages()) {
             StageState state;
-            if (label.equals(stage.stage())) {
+            if (planStage.stage().equals(stage.stage())) {
                 state = StageState.ACTIVE;
                 reachedCurrent = true;
             } else {
                 state = reachedCurrent ? StageState.UPCOMING : StageState.DONE;
             }
-            rail.add(new StagePlanEntry(label, state));
+            rail.add(new StagePlanEntry(planStage.stage(), state));
         }
 
         return new Interaction(
@@ -117,13 +173,36 @@ public class DefaultInteractionMapper {
                 null,
                 stage.captureType(),
                 stage.accepted(),
-                stage.kind() == ScreenKind.FORM ? MeridianScreenPlan.fieldsFor(stage, outstanding) : null,
+                stage.kind() == ScreenKind.FORM ? fieldsFor(stage, outstanding) : null,
                 null,
-                stage.kind() == ScreenKind.CONSENT ? MeridianScreenPlan.consentChecks() : null,
+                stage.kind() == ScreenKind.CONSENT ? screenPlan.consentChecks() : null,
                 stage.modules(),
                 null, null, null, null, null,
                 rail
         );
+    }
+
+    /**
+     * Fields for a form stage, derived from what Go says is outstanding.
+     * Unused while no configured plan has a FORM-kind stage, but kept so one
+     * can be added (e.g. Meridian's DETAILS stage, once Data Verification is
+     * restored — see application-meridian-health.yml) without rewriting this
+     * class.
+     */
+    private List<FieldSchema> fieldsFor(ScreenPlanProperties.Stage stage, List<String> outstanding) {
+        return outstanding.stream()
+                .filter(o -> o.startsWith(stage.prefix()))
+                .map(o -> FieldSchema.of(o, label(o), null))
+                .toList();
+    }
+
+    /** A human label for a domain element ref, falling back to a de-camel-cased leaf. */
+    private static String label(String ref) {
+        String known = LABELS.get(ref);
+        if (known != null) return known;
+        String leaf = ref.contains("/") ? ref.substring(ref.lastIndexOf('/') + 1) : ref;
+        String spaced = leaf.replaceAll("(?<!^)(?=[A-Z])", " ").toLowerCase(Locale.ROOT);
+        return Character.toUpperCase(spaced.charAt(0)) + spaced.substring(1);
     }
 
     public RecordResponse toRecord(GoStateResponse response) {
@@ -219,39 +298,37 @@ public class DefaultInteractionMapper {
     }
 
     /**
-     * A step's state, preferring its own result over the classification.
-     *
-     * `outcomeClassification` is absent on the nested per-module steps, which
-     * would make every module read as still Running on a finished journey. The
-     * step's `result.status` is populated there, and a module that errored is
-     * reported as Fail — it did not pass, and showing it as still running on a
-     * terminal screen would be worse.
+     * A step's state. `result.status` says whether the module *ran* to
+     * completion, not what it *decided* — that verdict is
+     * {@code outcomeClassification}, on the step itself. A module can
+     * complete and still decline (e.g. Document Authentication finishing and
+     * finding the document fraudulent), so `status: complete` on its own is
+     * not enough to call it a Pass; it only rules out the error/timeout/
+     * still-running cases and then defers to the classification, the same as
+     * the no-result fallback below.
      */
     private ModuleState mapModuleState(GoStateResponse.Step step) {
         GoStateResponse.StepResult result = step.result();
         if (result != null && result.status() != null) {
             return switch (result.status().toLowerCase(Locale.ROOT)) {
-                case "complete" -> ModuleState.PASS;
                 case "error", "timeout" -> ModuleState.FAIL;
                 case "pending" -> ModuleState.RUNNING;
+                // Ran to completion — the verdict is the classification, not the run status.
+                case "complete" -> classify(step.outcomeClassification(), ModuleState.REVIEW);
                 default -> ModuleState.REVIEW;
             };
         }
-        if (step.outcomeClassification() == null) return ModuleState.RUNNING;
-        return switch (step.outcomeClassification().toLowerCase(Locale.ROOT)) {
+        return classify(step.outcomeClassification(), ModuleState.RUNNING);
+    }
+
+    /** Positive/negative/other, falling back to {@code whenUnclassified} when Go hasn't reported one yet. */
+    private ModuleState classify(String outcomeClassification, ModuleState whenUnclassified) {
+        if (outcomeClassification == null) return whenUnclassified;
+        return switch (outcomeClassification.toLowerCase(Locale.ROOT)) {
             case "positive" -> ModuleState.PASS;
             case "negative" -> ModuleState.FAIL;
             default -> ModuleState.REVIEW;
         };
     }
 
-    private String humanize(String domainElementId) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < domainElementId.length(); i++) {
-            char c = domainElementId.charAt(i);
-            if (i > 0 && Character.isUpperCase(c)) out.append(' ');
-            out.append(i == 0 ? Character.toUpperCase(c) : c);
-        }
-        return out.toString();
-    }
 }

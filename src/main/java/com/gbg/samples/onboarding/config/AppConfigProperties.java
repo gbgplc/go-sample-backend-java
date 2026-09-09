@@ -1,6 +1,7 @@
 package com.gbg.samples.onboarding.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import java.util.List;
 
@@ -21,6 +22,13 @@ public record AppConfigProperties(
         String helpLine,
         String journeyName,
         String resourceId,
-        List<String> corsAllowedOrigins
+        List<String> corsAllowedOrigins,
+        /**
+         * Where the Consent Collection module's agreement wording lives — Go
+         * stores this URL against the consent record it creates, so it must be
+         * a real, stable location a real deployment can point at. Live-mode,
+         * Meridian-Health-journey-shaped only; see {@code GoInteractionSubmitRequest}.
+         */
+        @DefaultValue("https://meridianhealth.example/consent/record-access-v1") String consentUrl
 ) {
 }

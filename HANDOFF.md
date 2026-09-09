@@ -168,11 +168,17 @@ Meridian Health and Ridgeline Play follow once Northbank is proven out.
 builds it:
 1. The `resourceId` → goes in `application-<market>.yml`.
 2. The published journey's **schema** (Dashboard → journey → Actions → View
-   schema) → needed to replace `DefaultInteractionMapper`'s generic
-   placeholder copy ("A few more details", generic field labels) with real
-   screen content mapped from the actual domain elements. Go doesn't hand
-   back rendered UI copy — that mapping is this codebase's job, and it can't
-   be built correctly without seeing a real journey's schema to map against.
+   schema) → needed to write that market's **screen plan**: which
+   outstanding domain elements map to which screen, in what order, with what
+   copy. This lives in config now, not code — a `screen-plan:` block in
+   `application-<market>.yml` (`ScreenPlanProperties`; see
+   `application-meridian-health.yml` for Meridian Health's, the only one
+   written so far, verified against its published journey on 2026-09-07).
+   Go doesn't hand back rendered UI copy, and `DefaultInteractionMapper`
+   itself carries no market-specific knowledge — it just applies whichever
+   plan a deployment's config supplies, or a generic unbranded fallback form
+   if nothing is configured. The plan still has to be written by hand
+   against a real journey's domain elements; only *where it lives* changed.
 
 ## 8. Known gaps — don't rediscover these, they're already flagged
 

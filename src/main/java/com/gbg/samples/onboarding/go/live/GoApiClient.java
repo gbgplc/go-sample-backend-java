@@ -6,6 +6,7 @@ import com.gbg.samples.onboarding.api.dto.JourneyStatus;
 import com.gbg.samples.onboarding.api.dto.RecordResponse;
 import com.gbg.samples.onboarding.api.dto.StateResponse;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionResponse;
+import com.gbg.samples.onboarding.config.AppConfigProperties;
 import com.gbg.samples.onboarding.config.GoProperties;
 import com.gbg.samples.onboarding.go.GoClient;
 import com.gbg.samples.onboarding.go.GoStartResult;
@@ -24,6 +25,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -50,11 +53,31 @@ public class GoApiClient implements GoClient {
     private final RestClient client;
     private final GoTokenService tokenService;
     private final DefaultInteractionMapper mapper;
+    private final AppConfigProperties appConfig;
+
+    /**
+     * Last outstanding-elements list seen per Go instance, so a capture submit
+     * can tell document from selfie without an extra fetch. Bounded and
+     * access-ordered (evicts the least-recently-used entry once full) rather
+     * than a plain unbounded map — nothing here ever removes an instance on
+     * session expiry or journey completion, so an unbounded cache would grow
+     * for the life of the process against a long-running live-mode deployment.
+     */
+    private static final int MAX_CACHED_INSTANCES = 10_000;
+
+    private final Map<String, List<String>> lastOutstandingByInstance = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, List<String>> eldest) {
+                    return size() > MAX_CACHED_INSTANCES;
+                }
+            });
 
     public GoApiClient(GoProperties properties, GoTokenService tokenService,
-                        DefaultInteractionMapper mapper, RestClient.Builder builder) {
+                        DefaultInteractionMapper mapper, AppConfigProperties appConfig, RestClient.Builder builder) {
         this.tokenService = tokenService;
         this.mapper = mapper;
+        this.appConfig = appConfig;
         this.client = builder.baseUrl(properties.baseUrl()).build();
     }
 
@@ -84,6 +107,9 @@ public class GoApiClient implements GoClient {
         if (response == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
         }
+        if (response.outstanding() != null) {
+            lastOutstandingByInstance.put(instanceId, response.outstanding());
+        }
         Interaction interaction = mapper.toInteraction(response);
         return new SubmitInteractionResponse(statusFrom(interaction), interaction);
     }
@@ -94,7 +120,7 @@ public class GoApiClient implements GoClient {
         call(() -> client.post()
                 .uri("journey/interaction/submit")
                 .header("Authorization", "Bearer " + tokenService.accessToken())
-                .body(GoInteractionSubmitRequest.of(instanceId, interactionId, payload))
+                .body(GoInteractionSubmitRequest.of(instanceId, interactionId, payload, appConfig.consentUrl()))
                 .retrieve()
                 .toBodilessEntity());
         // The submit response only acknowledges receipt; the next screen comes
@@ -153,17 +179,23 @@ public class GoApiClient implements GoClient {
      * versus {@code subject.biometrics[].selfieImage}), so the distinction has
      * to come from the journey's own state: whichever image element is still
      * outstanding is the one being answered.
+     *
+     * The front end always fetches the current interaction to render the
+     * screen it's now submitting, so {@code fetchInteraction} has already
+     * populated {@link #lastOutstandingByInstance} for this instance — reusing
+     * that avoids a third Go call (fetch-to-disambiguate, submit, fetch-for-
+     * next-screen) on every single capture. A live fetch is only the
+     * fallback, for the unlikely case nothing has been cached yet (e.g. right
+     * after a restart).
      */
     private Map<String, Object> resolveAttachment(String instanceId, Map<String, Object> data) {
         Object ref = data == null ? null : data.get("attachmentRef");
         if (ref == null) return data;
 
-        // Ask Go directly what is still missing rather than reading the screen
-        // we just rendered: `outstanding` is the live answer, and it is what
-        // the front end's own next screen was derived from anyway. Document
-        // first, matching MeridianScreenPlan's order, so the two agree about
-        // which capture is being answered.
-        List<String> outstanding = fetchOutstanding(instanceId);
+        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, null);
+        if (outstanding == null) {
+            outstanding = fetchOutstanding(instanceId);
+        }
         boolean document = outstanding.stream().anyMatch(o -> o.startsWith("PrimaryDocument/"));
 
         Map<String, Object> rewritten = new java.util.LinkedHashMap<>(data);
@@ -206,8 +238,7 @@ public class GoApiClient implements GoClient {
                 throw OnboardingException.validationFailed("Some of the details you entered could not be verified.", null);
             }
             if (statusCode.value() == 429) {
-                throw new OnboardingException(com.gbg.samples.onboarding.api.dto.ErrorCode.RATE_LIMITED,
-                        "Too many attempts. Wait a moment and try again.");
+                throw OnboardingException.rateLimited("Too many attempts. Wait a moment and try again.");
             }
             throw OnboardingException.upstreamUnavailable("Something went wrong on our end. Try again shortly.");
         } catch (OnboardingException e) {

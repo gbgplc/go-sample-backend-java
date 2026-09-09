@@ -2,6 +2,8 @@ package com.gbg.samples.onboarding.api;
 
 import com.gbg.samples.onboarding.api.dto.ErrorCode;
 import com.gbg.samples.onboarding.api.dto.ErrorEnvelope;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -18,6 +20,8 @@ import java.util.Map;
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(OnboardingException.class)
     public ResponseEntity<ErrorEnvelope> handleOnboarding(OnboardingException ex) {
@@ -42,6 +46,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorEnvelope> handleUnexpected(Exception ex) {
+        log.error("Unhandled exception", ex);
         ErrorEnvelope body = new ErrorEnvelope(
                 ErrorCode.UPSTREAM_UNAVAILABLE,
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),

@@ -31,3 +31,72 @@ go:
   client-secret: ${GBG_CLIENT_SECRET:}
   username: ${GBG_USERNAME:}
   password: ${GBG_PASSWORD:}
+
+# Live-mode screens for this journey (DefaultInteractionMapper): which
+# outstanding domain elements map to which screen, in collection order.
+# Document before selfie (Facematch compares the selfie against the anchor
+# image Document Classification produces), consent last — Go enforces the
+# module dependency, not the collection order, but collecting in module
+# order keeps the progress rail honest. Copy matches
+# apps/meridian-health/onboarding.config.ts so the live journey reads
+# identically to the mock. No identity form: the journey has no FullName or
+# DateOfBirth element — Data Verification was removed after it proved unable
+# to source them on this tenant (HANDOFF.md, section "Known issue"). Add a
+# DETAILS stage here, prefix FullName/, if that module is restored.
+screen-plan:
+  stages:
+    - name: document
+      kind: capture
+      prefix: PrimaryDocument/
+      stage: Document
+      title: Scan your photo ID
+      body: We check the document is genuine and read the details from it.
+      cta: Scan document
+      capture-type: document
+      accepted:
+        - Passport
+        - Driving licence
+        - Biometric residence permit
+      modules:
+        - Document Classification
+        - Document Extraction
+        - Document Authentication
+    - name: biometrics
+      kind: capture
+      prefix: Selfie/
+      stage: Biometrics
+      title: Take a selfie
+      body: This proves you are the person in the document, so nobody else can open your record.
+      cta: Take selfie
+      capture-type: selfie
+      modules:
+        - Liveness Verification
+        - Facematch Verification
+    - name: consent
+      kind: consent
+      prefix: Consent/
+      stage: Consent
+      title: Share your record with Meridian Health
+      body: You decide what each group can see. You can change any of this later in settings.
+      cta: Agree and continue
+      modules:
+        - Consent Collection
+  # The design has three independent toggles; the Consent Collection module
+  # records acceptance of one agreement (its only required element is
+  # Consent/url). Only the first gates access — a patient who will not share
+  # with clinicians cannot be given a record — so that one drives the
+  # module, and the other two are recorded as preferences alongside it
+  # rather than as separate consent records.
+  consent-checks:
+    - name: shareWithClinicians
+      label: Show my record to clinicians treating me
+      detail: GP notes, test results, prescriptions and referrals
+      default-checked: true
+    - name: sharePrescriptions
+      label: Share prescriptions with my chosen pharmacy
+      detail: Only the pharmacy you name
+      default-checked: false
+    - name: useForResearch
+      label: Use my data for research
+      detail: Anonymised, optional, and unrelated to your care
+      default-checked: false

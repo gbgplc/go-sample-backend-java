@@ -13,7 +13,7 @@ this one — a front end must not be able to tell which it's talking to.
 com.gbg.samples.onboarding
 ├── api/            SessionController (the 7 REST endpoints) + error handling
 │   └── dto/         wire types — must match onboarding-core's TS types field-for-field
-├── config/          app.*, go.*, session.* configuration properties
+├── config/          app.*, go.*, session.*, screen-plan.* configuration properties
 ├── session/         Session, SessionStore — the session-to-instance mapping
 └── go/
     ├── GoClient.java        what the session layer needs from Go
@@ -27,15 +27,18 @@ com.gbg.samples.onboarding
 - **mock** (default) — `MockGoClient` runs the same scenario scripts as the
   front end's own mock transport, so this service runs standalone with no
   live Go credentials, mirroring the front-end's mock-mode requirement.
-- **live** — `GoApiClient` calls the real GBG Go v2 API
-  (`https://{region}.platform.go.gbgplc.com/v2/captain/`), using
-  `GoTokenService` for client-credentials auth. Structurally complete against
-  the documented v2 shapes, but not exercised against a live tenant while
-  building this — there's no published journey or credential set available
-  here to test against. `DefaultInteractionMapper` is the seam between Go's
-  domain-element schema and this service's opinionated screen-kind/copy
-  shape; it's a generic placeholder (see its Javadoc), not a finished mapping
-  — that needs a real published journey's domain elements to map against.
+- **live** — `GoApiClient` calls the real GBG Go v2 API (see "Two tenant
+  shapes" below — Meridian Health actually runs against the nonprod fabric
+  variant, not the public platform default), using `GoTokenService` for
+  token auth. `DefaultInteractionMapper` turns Go's flat, domain-element-
+  shaped interaction into a screen, but carries no market-specific knowledge
+  itself — which outstanding elements map to which screen, in what order,
+  with what copy, is `ScreenPlanProperties` (a `screen-plan:` block in
+  `application-<market>.yml`), config rather than code. Meridian Health's
+  plan is real, verified content (see `application-meridian-health.yml`); a
+  market with nothing configured there — Northbank and Ridgeline Play today
+  — gets a generic form built from whatever Go reports outstanding, rather
+  than a stall or a crash.
 
 One deployment fronts exactly one market — `app.market` plus a Spring
 profile per market sets the brand config, resource ID, and port, matching
@@ -158,10 +161,21 @@ correctly. To test with curl: `curl -c cookies.txt -b cookies.txt ...`.
 mvn test
 ```
 
-`OnboardingFlowIntegrationTest` drives the whole Northbank flow through real
-HTTP against `MockGoClient` — start, submit, idempotent resubmission, stale-
-interaction rejection, cookie enforcement, and the terminal record — the
-same contract `RestTransport` calls from the front end.
+- `OnboardingFlowIntegrationTest` drives the whole Northbank flow through real
+  HTTP against `MockGoClient` — start, submit, idempotent resubmission, stale-
+  interaction rejection, cookie enforcement, and the terminal record — the
+  same contract `RestTransport` calls from the front end.
+- `OpenApiContractTest` fetches the live-generated `/v3/api-docs` spec and
+  pins the endpoints and DTO field names a front end reads by name.
+  `SessionController`'s Javadoc says these must match `RestTransport` to the
+  field name; this test makes that an enforced check rather than a promise
+  a human has to remember — a rename or dropped field fails here instead of
+  surfacing later as a frontend-breaking change nobody connected back to it.
+- `SessionTest`, `DefaultInteractionMapperTest` and
+  `ScreenPlanPropertiesBindingTest` are plain unit tests (no Spring context)
+  covering the idempotent-retry logic, screen-plan selection and module-
+  verdict mapping, and that `application-meridian-health.yml`'s `screen-plan`
+  block actually binds the content it looks like it does.
 
 ## What's a placeholder here
 
@@ -175,3 +189,8 @@ same contract `RestTransport` calls from the front end.
   or decline, is a compliance decision the handoff doc flags as open.
 - **Session storage** is in-memory and single-node — swap `SessionStore` for
   Redis or similar before running more than one instance.
+- **The default consent record URL** (`app.consent-url`, read by
+  `GoInteractionSubmitRequest` when submitting the Consent module) is a
+  placeholder (`https://meridianhealth.example/...`) — override it in
+  `application-meridian-health.yml` before any real submission, since Go
+  stores this URL as the auditable record of what was agreed to.

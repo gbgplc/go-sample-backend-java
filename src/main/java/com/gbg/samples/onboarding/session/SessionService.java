@@ -54,22 +54,37 @@ public class SessionService {
 
     public Interaction getInteraction(String sessionId, String cookieToken) {
         Session session = authorize(sessionId, cookieToken);
-        return goClient.fetchInteraction(session.goInstanceId()).interaction();
+        // Locked the same as submitInteraction: GoApiClient's live-mode capture
+        // disambiguation caches the outstanding-elements list per Go instance,
+        // keyed off calls exactly like this one. Left unlocked, a poll here
+        // could interleave with a concurrent submit's read of that cache and
+        // hand it a snapshot from the wrong moment — serializing per session
+        // closes that race the same way it closes the idempotency one.
+        synchronized (session) {
+            return goClient.fetchInteraction(session.goInstanceId()).interaction();
+        }
     }
 
     public SubmitInteractionResponse submitInteraction(String sessionId, String cookieToken, String interactionId, Map<String, Object> data) {
         Session session = authorize(sessionId, cookieToken);
 
-        if (session.isRetryOf(interactionId, data)) {
-            return session.cachedResponse();
-        }
-        if (session.currentInteractionId() != null && !session.currentInteractionId().equals(interactionId)) {
-            throw OnboardingException.interactionStale("This step has moved on. Refetching the current one.");
-        }
+        // Locked per-session so two near-simultaneous identical submits (a
+        // double-tap, a client retry) can't both pass the retry check before
+        // either records the advance — without this, both would reach
+        // goClient.submitInteraction, which is exactly what the idempotency
+        // check exists to prevent.
+        synchronized (session) {
+            if (session.isRetryOf(interactionId, data)) {
+                return session.cachedResponse();
+            }
+            if (session.currentInteractionId() != null && !session.currentInteractionId().equals(interactionId)) {
+                throw OnboardingException.interactionStale("This step has moved on. Refetching the current one.");
+            }
 
-        SubmitInteractionResponse response = goClient.submitInteraction(session.goInstanceId(), interactionId, data);
-        session.recordAdvance(interactionId, data, response);
-        return response;
+            SubmitInteractionResponse response = goClient.submitInteraction(session.goInstanceId(), interactionId, data);
+            session.recordAdvance(interactionId, data, response);
+            return response;
+        }
     }
 
     public StateResponse getState(String sessionId, String cookieToken) {
