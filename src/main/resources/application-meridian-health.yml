@@ -13,7 +13,7 @@ app:
   # Published to Preview on the gbggo4-demo tenant, 2026-09-07. Pinned to an
   # exact version rather than @latest: @latest costs a Journey-builder lookup
   # on every start and doesn't pick up a publish predictably.
-  resource-id: b3d149562ec927dedcd76f3a6b7b0f82bbf7de818aebad3b3f7baa4c14940b6b@2g6no1nz
+  resource-id: b3d149562ec927dedcd76f3a6b7b0f82bbf7de818aebad3b3f7baa4c14940b6b@5ph3fkm5
   cors-allowed-origins:
     - http://localhost:3001
 
@@ -33,18 +33,68 @@ go:
   password: ${GBG_PASSWORD:}
 
 # Live-mode screens for this journey (DefaultInteractionMapper): which
-# outstanding domain elements map to which screen, in collection order.
-# Document before selfie (Facematch compares the selfie against the anchor
-# image Document Classification produces), consent last — Go enforces the
-# module dependency, not the collection order, but collecting in module
-# order keeps the progress rail honest. Copy matches
-# apps/meridian-health/onboarding.config.ts so the live journey reads
-# identically to the mock. No identity form: the journey has no FullName or
-# DateOfBirth element — Data Verification was removed after it proved unable
-# to source them on this tenant (HANDOFF.md, section "Known issue"). Add a
-# DETAILS stage here, prefix FullName/, if that module is restored.
+# domain elements map to which screen, in collection order.
+#
+# Written against the journey published on gbggo4-demo
+# (resource b3d1495…@5ph3fkm5) from what a live fetch returns — verified
+# 2026-09-10. Stages match against the interaction's `collects` list, which
+# names 47 refs across seven pages; `outstanding` is the narrower field and
+# omits any element whose parent is optional, so matching on that alone
+# drops pages the journey really has.
+#
+# Order follows the journey's own pages: consent first — a patient consents
+# to their record being opened before anything is collected — then identity
+# and contact details, the address, and document before selfie, because
+# Facematch compares the selfie against the anchor image Document
+# Classification produces. Go enforces the module dependency, not the
+# collection order, but collecting in module order keeps the progress rail
+# honest.
+#
+# Copy matches apps/meridian-health/onboarding.config.ts so the live journey
+# reads identically to the mock.
 screen-plan:
   stages:
+    - name: consent
+      kind: consent
+      prefix: Consent/
+      stage: Consent
+      title: Share your record with Meridian Health
+      body: You decide what each group can see. You can change any of this later in settings.
+      cta: Agree and continue
+      modules:
+        - Consent Collection
+    # also-prefixes: one screen, several domain elements. Each is a separate
+    # top-level element in `collects`, so a single prefix would claim only the
+    # first and the screen would render one field out of three.
+    - name: personal
+      kind: form
+      prefix: MothersMaidenName
+      also-prefixes:
+        - Gender
+        - NationalInsuranceNumber
+      stage: Details
+      title: Your details
+      body: We match these against national records to find your patient file.
+      cta: Continue
+    - name: contact
+      kind: form
+      prefix: MobilePhone/
+      also-prefixes:
+        - LandlinePhone/
+      stage: Contact
+      title: How can we reach you?
+      body: We use this to confirm it is you, and to tell you when your record is ready.
+      cta: Continue
+    # Fields, types and helper text come from the journey's own `collects`
+    # (DefaultInteractionMapper.fieldsFor), filtered to the required ones —
+    # CurrentAddress alone lists 18 fields, of which 5 are required.
+    - name: address
+      kind: form
+      prefix: CurrentAddress/
+      stage: Address
+      title: Your address
+      body: We match this against national records to find your patient file.
+      cta: Continue
     - name: document
       kind: capture
       prefix: PrimaryDocument/
@@ -72,15 +122,6 @@ screen-plan:
       modules:
         - Liveness Verification
         - Facematch Verification
-    - name: consent
-      kind: consent
-      prefix: Consent/
-      stage: Consent
-      title: Share your record with Meridian Health
-      body: You decide what each group can see. You can change any of this later in settings.
-      cta: Agree and continue
-      modules:
-        - Consent Collection
   # The design has three independent toggles; the Consent Collection module
   # records acceptance of one agreement (its only required element is
   # Consent/url). Only the first gates access — a patient who will not share

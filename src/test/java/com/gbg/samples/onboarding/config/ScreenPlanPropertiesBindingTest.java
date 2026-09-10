@@ -22,12 +22,40 @@ class ScreenPlanPropertiesBindingTest {
 
     @Test
     void meridianHealthStagesBindInCollectionOrder() {
+        // Consent first: a patient agrees to their record being opened before
+        // anything is collected. Document before selfie, because Facematch
+        // compares the selfie against the anchor image Classification
+        // produces.
         assertThat(screenPlan.stages()).extracting(ScreenPlanProperties.Stage::name)
-                .containsExactly("document", "biometrics", "consent");
-        assertThat(screenPlan.stages().get(0).title()).isEqualTo("Scan your photo ID");
-        assertThat(screenPlan.stages().get(0).captureType()).isEqualTo("document");
-        assertThat(screenPlan.stages().get(0).accepted())
+                .containsExactly("consent", "personal", "contact", "address", "document", "biometrics");
+
+        ScreenPlanProperties.Stage document = screenPlan.stages().stream()
+                .filter(s -> "document".equals(s.name()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(document.title()).isEqualTo("Scan your photo ID");
+        assertThat(document.captureType()).isEqualTo("document");
+        assertThat(document.accepted())
                 .containsExactly("Passport", "Driving licence", "Biometric residence permit");
+    }
+
+    /**
+     * A screen collecting several top-level elements names the extra ones in
+     * also-prefixes; a single prefix would claim only the first, and the
+     * screen would render one field out of three.
+     */
+    @Test
+    void aMultiElementScreenClaimsEveryPrefixItLists() {
+        ScreenPlanProperties.Stage personal = screenPlan.stages().stream()
+                .filter(s -> "personal".equals(s.name()))
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(personal.prefixes())
+                .containsExactly("MothersMaidenName", "Gender", "NationalInsuranceNumber");
+        assertThat(personal.claimsRef("Gender")).isTrue();
+        assertThat(personal.claimsRef("NationalInsuranceNumber")).isTrue();
+        assertThat(personal.claimsRef("CurrentAddress/building")).isFalse();
     }
 
     @Test

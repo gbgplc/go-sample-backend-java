@@ -564,7 +564,8 @@ public class DefaultInteractionMapper {
                 systemError ? "Try again" : "Done",
                 moduleRuns,
                 List.of(),
-                null
+                null,
+                systemError
         );
     }
 
