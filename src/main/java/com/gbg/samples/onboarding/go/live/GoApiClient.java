@@ -3,6 +3,7 @@ package com.gbg.samples.onboarding.go.live;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.JourneyStatus;
+import com.gbg.samples.onboarding.api.dto.ModuleState;
 import com.gbg.samples.onboarding.api.dto.RecordResponse;
 import com.gbg.samples.onboarding.api.dto.StateResponse;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionResponse;
@@ -73,6 +74,50 @@ public class GoApiClient implements GoClient {
                 }
             });
 
+    /**
+     * Last instructions seen per Go instance, so a capture submit can tell the
+     * back of a document from the front without an extra fetch — the same
+     * reason {@link #lastOutstandingByInstance} exists, and populated from the
+     * same response. {@code Side2Required} is the signal that matters.
+     */
+    private final Map<String, List<String>> lastInstructionsByInstance = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, List<String>> eldest) {
+                    return size() > MAX_CACHED_INSTANCES;
+                }
+            });
+
+    /**
+     * Stage names already submitted, per Go instance — the journey's progress.
+     *
+     * Go's {@code outstanding} list is a static declaration of everything the
+     * journey collects, not a shrinking to-do list. Verified against the
+     * Northbank journey on {@code gbggo4-demo} (2026-09-10): submitting the
+     * whole address returns {@code {"status":"success"}} and the very next
+     * fetch returns a byte-identical {@code outstanding}.
+     *
+     * That breaks the rule the screen plan was written against — "first stage
+     * whose elements are still outstanding wins" — because the first stage
+     * always still claims something. The customer submits the address, the
+     * next fetch picks the same stage again, and the journey loops on screen
+     * one forever. It went unnoticed while every live market collected through
+     * capture and consent screens, which submit one element each and finish;
+     * Northbank is the first with a FORM stage.
+     *
+     * So progress is tracked here instead: a stage is done once submitted, and
+     * {@code toInteraction} skips it. Same lifetime and bound as the cache
+     * above — in-memory and single-node, which is what {@code SessionStore}
+     * already is, and the note there about swapping for Redis applies equally.
+     */
+    private final Map<String, java.util.Set<String>> completedStagesByInstance = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, java.util.Set<String>> eldest) {
+                    return size() > MAX_CACHED_INSTANCES;
+                }
+            });
+
     public GoApiClient(GoProperties properties, GoTokenService tokenService,
                         DefaultInteractionMapper mapper, AppConfigProperties appConfig, RestClient.Builder builder) {
         this.tokenService = tokenService;
@@ -110,19 +155,43 @@ public class GoApiClient implements GoClient {
         if (response.outstanding() != null) {
             lastOutstandingByInstance.put(instanceId, response.outstanding());
         }
-        Interaction interaction = mapper.toInteraction(response);
+        if (response.instructions() != null) {
+            lastInstructionsByInstance.put(instanceId, response.instructions());
+        }
+        Interaction interaction = mapper.toInteraction(response, completedStages(instanceId));
         return new SubmitInteractionResponse(statusFrom(interaction), interaction);
+    }
+
+    /** Stage names already submitted on this instance; never null. */
+    private java.util.Set<String> completedStages(String instanceId) {
+        java.util.Set<String> done = completedStagesByInstance.get(instanceId);
+        return done == null ? java.util.Set.of() : java.util.Set.copyOf(done);
     }
 
     @Override
     public SubmitInteractionResponse submitInteraction(String instanceId, String interactionId, Map<String, Object> data) {
         Map<String, Object> payload = resolveAttachment(instanceId, data);
+        // Which stage this submit answers, read before the call so a Go
+        // rejection leaves progress untouched — a failed submit must not mark
+        // its stage done, or a validation error would skip the screen the
+        // customer still has to correct.
+        String submittedStage = mapper.stageFor(payload.keySet(), completedStages(instanceId));
+        // Field names only, never values: enough to see which stage a submit
+        // answered when Go rejects it with an opaque 500, without putting a
+        // customer's details in the log. This is what identified a front end
+        // resubmitting an earlier screen's fields alongside the current one.
+        log.debug("Submitting to Go: instance={} stage={} keys={}", instanceId, submittedStage, payload.keySet());
         call(() -> client.post()
                 .uri("journey/interaction/submit")
                 .header("Authorization", "Bearer " + tokenService.accessToken())
                 .body(GoInteractionSubmitRequest.of(instanceId, interactionId, payload, appConfig.consentUrl()))
                 .retrieve()
                 .toBodilessEntity());
+        if (submittedStage != null) {
+            completedStagesByInstance
+                    .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new java.util.LinkedHashSet<>()))
+                    .add(submittedStage);
+        }
         // The submit response only acknowledges receipt; the next screen comes
         // from re-fetching the interaction, same as the mock's own response shape.
         return fetchInteraction(instanceId);
@@ -131,14 +200,36 @@ public class GoApiClient implements GoClient {
     @Override
     public StateResponse fetchState(String instanceId) {
         GoStateResponse response = fetchGoState(instanceId);
-        // A Failed journey is terminal. Reporting IN_PROGRESS would leave the
-        // front end's processing screen polling an instance that will never
-        // advance, so it reports COMPLETED — the decision it carries is `fail`.
+        RecordResponse asRecord = mapper.toRecord(response);
+
+        // Terminal on any of three signals, because journeys end differently:
+        //
+        //  - status "Completed" — the straightforward case;
+        //  - Failed or Error — terminal too. Reporting IN_PROGRESS would leave
+        //    the processing screen polling an instance that will never advance,
+        //    so it reports COMPLETED carrying a `fail` decision;
+        //  - a decision reached with every module run finished. The Northbank
+        //    journey settles on `refer` without its status ever reaching
+        //    Completed (verified on the live tenant, 2026-09-10): the referral
+        //    branch leaves the instance open for the out-of-band review the
+        //    design describes. Polling for the status alone spins forever on a
+        //    journey that has already decided — "Running your checks", with the
+        //    decision sitting in the very response being ignored.
+        // `asRecord.decision()` cannot answer this on its own: mapDecision
+        // defaults a missing result to REFER, so it is non-null from the first
+        // poll onwards. The decision is real only when Go sent a result with a
+        // classification on it, and every module that ran has stopped running.
+        boolean carriesRealResult = response.result() != null
+                && response.result().outcomeClassification() != null;
+        boolean everyModuleSettled = !asRecord.moduleRuns().isEmpty()
+                && asRecord.moduleRuns().stream().noneMatch(run -> ModuleState.RUNNING.equals(run.state()));
+        boolean decided = carriesRealResult && everyModuleSettled;
+
         JourneyStatus status = "Completed".equalsIgnoreCase(response.status())
                 || DefaultInteractionMapper.isFailed(response.status())
+                || decided
                 ? JourneyStatus.COMPLETED
                 : JourneyStatus.IN_PROGRESS;
-        RecordResponse asRecord = mapper.toRecord(response);
         return new StateResponse(status, asRecord.decision(), asRecord.moduleRuns());
     }
 
@@ -196,7 +287,41 @@ public class GoApiClient implements GoClient {
         if (outstanding == null) {
             outstanding = fetchOutstanding(instanceId);
         }
-        boolean document = outstanding.stream().anyMatch(o -> o.startsWith("PrimaryDocument/"));
+
+        // Which capture this is, from the stage the customer is actually on.
+        //
+        // Reading it from `outstanding` alone — "is PrimaryDocument/ still
+        // listed?" — is wrong wherever the journey does not advertise the
+        // element. Northbank collects its document lazily and never lists it,
+        // so every capture classified as a selfie: the document photo was sent
+        // as subject.biometrics, Document Classification never received an
+        // image, and nothing appeared against the document modules in Go.
+        //
+        // The stage plan already knows which screen is being submitted, and it
+        // is the same source the screen itself was rendered from, so the two
+        // cannot disagree. `outstanding` remains the fallback for a market with
+        // no configured plan.
+        // The back of the document, when Go has asked for it. Checked first:
+        // by this point side 1 is submitted and the document stage counts as
+        // completed, so the stage-based check below would read the capture as
+        // the selfie and overwrite the wrong element.
+        if (lastInstructionsByInstance.getOrDefault(instanceId, List.of()).stream()
+                        .anyMatch("Side2Required"::equalsIgnoreCase)
+                || outstanding.contains("PrimaryDocument/side2Image")) {
+            log.debug("Capture routed as DOCUMENT BACK: instance={} outstanding={}", instanceId, outstanding);
+            Map<String, Object> back = new java.util.LinkedHashMap<>(data);
+            back.remove("attachmentRef");
+            back.put("documentBack", ref);
+            return back;
+        }
+
+        Boolean capturingDocument = mapper.currentCaptureIsDocument(outstanding, completedStages(instanceId));
+        boolean document = capturingDocument != null
+                ? capturingDocument
+                : outstanding.stream().anyMatch(o -> o.startsWith("PrimaryDocument/"));
+
+        log.debug("Capture routed as {}: instance={} completed={} outstanding={}",
+                document ? "DOCUMENT" : "SELFIE", instanceId, completedStages(instanceId), outstanding);
 
         Map<String, Object> rewritten = new java.util.LinkedHashMap<>(data);
         rewritten.remove("attachmentRef");

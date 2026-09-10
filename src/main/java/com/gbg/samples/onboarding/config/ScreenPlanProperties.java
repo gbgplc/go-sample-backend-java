@@ -53,11 +53,90 @@ public record ScreenPlanProperties(@Valid List<Stage> stages, @Valid List<Consen
             String cta,
             String captureType,
             List<String> accepted,
-            List<String> modules
+            List<String> modules,
+            Boolean alwaysCollect,
+            List<String> alsoPrefixes
     ) {
+        /**
+         * Every ref prefix this screen collects: {@code prefix} plus any
+         * {@code also-prefixes}.
+         *
+         * One screen often collects several domain elements — this journey's
+         * personal-details page asks for MothersMaidenName, Gender and
+         * NationalInsuranceNumber, and its contact page for two emails and two
+         * phones. Each is a separate top-level element, so a single prefix
+         * claims only the first and the screen renders one box out of three.
+         */
+        public List<String> prefixes() {
+            if (alsoPrefixes == null || alsoPrefixes.isEmpty()) return List.of(prefix);
+            List<String> all = new java.util.ArrayList<>(alsoPrefixes.size() + 1);
+            all.add(prefix);
+            all.addAll(alsoPrefixes);
+            return List.copyOf(all);
+        }
+
+        /**
+         * This stage rendered as the second document side.
+         *
+         * A two-sided document is one stage collected twice: Go accepts side 1,
+         * Classification identifies a document type that has a back, and the
+         * next fetch asks for side 2. Reusing the stage keeps the progress rail
+         * honest — it is still the Document step, not a sixth one — while the
+         * copy and captureType change so the customer is told to turn the
+         * document over, and so the front end submits it as documentBack
+         * (which maps to PrimaryDocument/side2Image) rather than overwriting
+         * side 1.
+         *
+         * The title and body are fixed here rather than configurable: they
+         * describe a platform behaviour ("now the other side"), not a market's
+         * product copy, and every market's answer to it is the same sentence.
+         */
+        public Stage asSecondSide() {
+            return new Stage(
+                    name + "-side2",
+                    kind,
+                    prefix,
+                    stage,
+                    "Now the other side",
+                    "Turn your document over and scan the back.",
+                    cta == null ? "Scan the back" : cta,
+                    "document-back",
+                    accepted,
+                    modules,
+                    Boolean.TRUE,
+                    alsoPrefixes);
+        }
+
         /** True when this stage still has something to collect. */
         public boolean claims(List<String> outstanding) {
-            return outstanding.stream().anyMatch(o -> o.startsWith(prefix));
+            return outstanding.stream().anyMatch(this::claimsRef);
+        }
+
+        /** True when {@code ref} is one this stage collects. */
+        public boolean claimsRef(String ref) {
+            return ref != null && prefixes().stream().anyMatch(ref::startsWith);
+        }
+
+        /**
+         * Whether this stage runs even when Go never lists its elements as
+         * outstanding.
+         *
+         * A journey can accept an element it does not advertise. Northbank's
+         * journey on {@code gbggo4-demo} collects its document lazily — the
+         * fetch carries instruction {@code LazySide2CollectionRequired}, and
+         * {@code outstanding} never names {@code PrimaryDocument/} — yet
+         * submitting a document to it returns {@code {"status":"success"}}
+         * (verified against the live tenant, 2026-09-10). Selecting stages on
+         * {@code outstanding} alone therefore skips the document screen and
+         * sends the customer from address straight to selfie.
+         *
+         * Off by default, so a market whose journey does advertise its
+         * elements is unaffected: a stage nothing claims stays skipped, which
+         * is what stops a retired or unconfigured module rendering a screen
+         * whose submit goes nowhere.
+         */
+        public boolean alwaysCollects() {
+            return Boolean.TRUE.equals(alwaysCollect);
         }
     }
 }

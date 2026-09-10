@@ -125,6 +125,16 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
             NONE,
             /** {@code phones: [{type, number}]} */
             PHONE,
+            /** {@code phones: [{type: "mobile", number}]} */
+            PHONE_MOBILE,
+            /** {@code phones: [{type: "landline", number}]} */
+            PHONE_LANDLINE,
+            /** {@code emails: [{type: "personal", email}]} */
+            EMAIL_PERSONAL,
+            /** {@code emails: [{type: "work", email}]} */
+            EMAIL_WORK,
+            /** {@code idNumbers: [{type, idNumber}]} */
+            ID_NUMBER,
             /** {@code documents: [{type, side1Image, side2Image}]} */
             DOCUMENT_SIDE1,
             DOCUMENT_SIDE2,
@@ -154,10 +164,38 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                         new String[]{"identity", "currentAddress", "locality"}, Wrap.NONE)),
                 Map.entry("postcode", new FieldMapping("CurrentAddress",
                         new String[]{"identity", "currentAddress", "postalCode"}, Wrap.NONE)),
+                // Go's element leaf is postalCode; "postcode" above is the short
+                // name a hand-built screen sends. Both are here so a FORM stage
+                // named after the ref resolves by leaf like every other field.
+                Map.entry("postalCode", new FieldMapping("CurrentAddress",
+                        new String[]{"identity", "currentAddress", "postalCode"}, Wrap.NONE)),
                 Map.entry("country", new FieldMapping("CurrentAddress",
                         new String[]{"identity", "currentAddress", "country"}, Wrap.NONE)),
 
                 Map.entry("mobileNumber", new FieldMapping("MobilePhone", new String[]{"identity", "phones"}, Wrap.PHONE)),
+
+                // Contact and personal details. Phones and emails are arrays
+                // of typed objects; the type discriminator is what maps each
+                // entry back to its domain element (submit-interaction
+                // reference: 'personal' -> PersonalEmail, 'work' -> WorkEmail).
+                // Both leaves are "number"/"email", so these can only be
+                // resolved by their full ref, never by leaf.
+                Map.entry("MobilePhone/number",
+                        new FieldMapping("MobilePhone", new String[]{"identity", "phones"}, Wrap.PHONE_MOBILE)),
+                Map.entry("LandlinePhone/number",
+                        new FieldMapping("LandlinePhone", new String[]{"identity", "phones"}, Wrap.PHONE_LANDLINE)),
+                Map.entry("PersonalEmail/email",
+                        new FieldMapping("PersonalEmail", new String[]{"identity", "emails"}, Wrap.EMAIL_PERSONAL)),
+                Map.entry("WorkEmail/email",
+                        new FieldMapping("WorkEmail", new String[]{"identity", "emails"}, Wrap.EMAIL_WORK)),
+                Map.entry("MothersMaidenName",
+                        new FieldMapping("MothersMaidenName", new String[]{"identity", "mothersMaidenName"}, Wrap.NONE)),
+                Map.entry("Gender",
+                        new FieldMapping("Gender", new String[]{"identity", "gender"}, Wrap.NONE)),
+                // idNumbers[] carries a type and the number itself, the same
+                // shape as phones — an NI number is not a bare identity field.
+                Map.entry("NationalInsuranceNumber",
+                        new FieldMapping("NationalInsuranceNumber", new String[]{"identity", "idNumbers"}, Wrap.ID_NUMBER)),
 
                 // Document and biometric capture. The front end sends an
                 // attachment reference or a data URL; either way it lands as
@@ -167,9 +205,67 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                 Map.entry("selfieImage", new FieldMapping("Selfie", new String[]{"biometrics"}, Wrap.SELFIE))
         );
 
+        /**
+         * The mapping for one submitted field, by either name it can arrive under.
+         *
+         * A FORM stage's fields are named by {@code DefaultInteractionMapper.fieldsFor}
+         * after the domain element refs Go reports outstanding, so the front end
+         * submits {@code CurrentAddress/postalCode} rather than {@code postcode}.
+         * The keys below are the short names, which is all the capture and consent
+         * screens ever send — and until Northbank became the first market with a
+         * configured FORM stage, no request had exercised the difference. A
+         * prefixed ref missed every entry, fell through to the fallback, and Go
+         * rejected the submit with "Required domain element
+         * 'CurrentAddress/building' data is missing from context", which reaches
+         * the customer as a Continue button that does nothing.
+         *
+         * So: try the key as sent, then its leaf. Leaf names are unique across
+         * this table, and matching {@code <Element>/<leaf>} on the leaf lands a
+         * ref at the same path as the short name it duplicates.
+         */
         static FieldMapping forKey(String key) {
             FieldMapping known = KNOWN.get(key);
+            if (known == null && key.contains("/")) {
+                known = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+            }
             return known != null ? known : new FieldMapping(key, new String[]{key}, Wrap.NONE);
+        }
+
+        /**
+         * A country as Go will accept it: {@code /^[A-Z]{2,3}$/}.
+         *
+         * The front end renders this as a plain text box — its field type
+         * vocabulary has no select — so a customer types "United Kingdom" and
+         * Go answers 400 "Invalid string: must match pattern", which surfaces
+         * as a Continue button that does nothing. An already-valid code passes
+         * through untouched (upper-cased), and a name this table doesn't know
+         * is sent as typed so Go's own error stands rather than a guess.
+         *
+         * Deliberately short: the UK plus the countries this demo's journeys
+         * name. It is a nudge for hand-typed input, not an i18n country table.
+         */
+        private static final Map<String, String> COUNTRY_CODES = Map.ofEntries(
+                Map.entry("UNITED KINGDOM", "GBR"),
+                Map.entry("GREAT BRITAIN", "GBR"),
+                Map.entry("ENGLAND", "GBR"),
+                Map.entry("SCOTLAND", "GBR"),
+                Map.entry("WALES", "GBR"),
+                Map.entry("NORTHERN IRELAND", "GBR"),
+                Map.entry("UK", "GBR"),
+                Map.entry("IRELAND", "IRL"),
+                Map.entry("UNITED STATES", "USA"),
+                Map.entry("UNITED STATES OF AMERICA", "USA"),
+                Map.entry("USA", "USA")
+        );
+
+        private static String countryCode(String typed) {
+            String trimmed = typed == null ? "" : typed.trim();
+            String upper = trimmed.toUpperCase(java.util.Locale.ROOT);
+            if (upper.matches("^[A-Z]{2,3}$")) {
+                return upper;
+            }
+            String mapped = COUNTRY_CODES.get(upper);
+            return mapped != null ? mapped : trimmed;
         }
 
         @SuppressWarnings("unchecked")
@@ -182,6 +278,15 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
             String text = String.valueOf(value);
             switch (wrap) {
                 case PHONE -> cursor.put(leaf, List.of(Map.of("type", "mobile", "number", text)));
+                // Appended, not put: a journey collecting both a personal and a
+                // work email sends them as separate fields on one screen, and
+                // the second would otherwise replace the first in emails[].
+                case PHONE_MOBILE -> append(cursor, leaf, Map.of("type", "mobile", "number", text));
+                case PHONE_LANDLINE -> append(cursor, leaf, Map.of("type", "landline", "number", text));
+                case EMAIL_PERSONAL -> append(cursor, leaf, Map.of("type", "personal", "email", text));
+                case EMAIL_WORK -> append(cursor, leaf, Map.of("type", "work", "email", text));
+                case ID_NUMBER -> append(cursor, leaf,
+                        Map.of("type", "NationalInsuranceNumber", "idNumber", text));
                 // Both document sides belong to one entry in documents[], so a
                 // second side merges into the existing object rather than
                 // appending a second document.
@@ -195,7 +300,7 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                 // it, which is what makes this one easy to miss.
                 case SELFIE -> cursor.put(leaf, List.of(
                         new LinkedHashMap<>(Map.of("type", "Selfie", "selfieImage", text))));
-                case NONE -> cursor.put(leaf, value);
+                case NONE -> cursor.put(leaf, "country".equals(leaf) ? countryCode(text) : value);
             }
         }
 
@@ -212,6 +317,18 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
          * document, but the live platform does not accept it.
          */
         @SuppressWarnings("unchecked")
+        /** Adds one entry to a typed array under {@code leaf}, creating it if absent. */
+        private static void append(Map<String, Object> cursor, String leaf, Map<String, String> entry) {
+            Object existing = cursor.get(leaf);
+            List<Object> entries = existing instanceof List<?> list
+                    ? (List<Object>) list
+                    : new java.util.ArrayList<>();
+            if (!(existing instanceof List<?>)) {
+                cursor.put(leaf, entries);
+            }
+            entries.add(new LinkedHashMap<>(entry));
+        }
+
         private static void mergeDocument(Map<String, Object> cursor, String leaf, String side, String image) {
             List<Map<String, Object>> documents = (List<Map<String, Object>>) cursor.get(leaf);
             Map<String, Object> document;

@@ -55,7 +55,13 @@ public class DefaultInteractionMapper {
             Map.entry("CurrentAddress/locality", "Town or city"),
             Map.entry("CurrentAddress/postalCode", "Postcode"),
             Map.entry("CurrentAddress/country", "Country"),
-            Map.entry("MobilePhone/number", "Mobile number")
+            Map.entry("MobilePhone/number", "Mobile number"),
+            Map.entry("LandlinePhone/number", "Landline number"),
+            Map.entry("PersonalEmail/email", "Personal email"),
+            Map.entry("WorkEmail/email", "Work email"),
+            Map.entry("MothersMaidenName", "Mother's maiden name"),
+            Map.entry("NationalInsuranceNumber", "National Insurance number"),
+            Map.entry("Gender", "Gender")
     );
 
     private final ScreenPlanProperties screenPlan;
@@ -64,7 +70,25 @@ public class DefaultInteractionMapper {
         this.screenPlan = screenPlan;
     }
 
+    /**
+     * The next screen, for a journey with no stages submitted yet.
+     *
+     * Equivalent to {@code toInteraction(response, Set.of())}. A journey in
+     * flight must use the two-argument form: without the completed set, a
+     * multi-stage plan re-picks its first stage on every fetch, because Go's
+     * `outstanding` never shrinks.
+     */
     public Interaction toInteraction(GoInteractionFetchResponse response) {
+        return toInteraction(response, java.util.Set.of());
+    }
+
+    /**
+     * The next screen, given the stages already submitted on this journey.
+     *
+     * @param completed stage names (as configured in {@code screen-plan.stages[].name})
+     *                  the customer has already submitted; never null.
+     */
+    public Interaction toInteraction(GoInteractionFetchResponse response, java.util.Set<String> completed) {
         String goStatus = response.journey() == null ? null : response.journey().status();
         JourneyStatus status = mapStatus(goStatus, response.processing());
         String interactionId = response.interactionId() != null ? response.interactionId() : response.instanceId();
@@ -100,21 +124,117 @@ public class DefaultInteractionMapper {
             return processingInteraction(interactionId);
         }
 
-        List<String> outstanding = response.outstanding() == null ? List.of() : response.outstanding();
+        // What this interaction can collect, preferring `collects` over
+        // `outstanding`.
+        //
+        // `outstanding` names only what Go is currently blocking on, so an
+        // element whose parent is optional never appears in it. On the
+        // Northbank journey that is 6 refs against the 37 in `collects` —
+        // every PrimaryDocument/* field, both emails, both phones,
+        // MothersMaidenName, Gender and NationalInsuranceNumber are missing
+        // from it. Selecting screens on `outstanding` therefore silently drops
+        // most of the journey's own pages: the document, personal-details and
+        // contact-details screens never render, however the plan is written.
+        //
+        // `collects` is the interaction's full contract (fetch-interaction
+        // reference), so it is what the screen plan matches against. Falls
+        // back to `outstanding` when an interaction carries no collects — the
+        // mock, and any market whose journey predates this field.
+        List<String> collectable = response.collects().stream()
+                .map(GoInteractionFetchResponse.Collect::ref)
+                .toList();
+        List<String> outstanding = collectable.isEmpty()
+                ? (response.outstanding() == null ? List.of() : response.outstanding())
+                : collectable;
 
-        // Nothing outstanding but not yet Completed: modules are running.
+        // The refs the journey marks required, so a form stage can render those
+        // and leave the optional ones out. Empty when the interaction carries
+        // no collects, which fieldsFor reads as "show everything named".
+        java.util.Set<String> requiredRefs = response.collects().stream()
+                .filter(GoInteractionFetchResponse.Collect::required)
+                .map(GoInteractionFetchResponse.Collect::ref)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+
+        // Nothing to collect but not yet Completed: modules are running.
         if (outstanding.isEmpty()) {
             return processingInteraction(interactionId);
         }
 
-        // Go returns a single interaction listing everything still outstanding
-        // at once; splitting that into screens is the client's job under
+        // Go returns a single interaction listing everything the journey
+        // collects; splitting that into screens is the client's job under
         // `delivery: "api"`. The configured screen plan holds that decision —
-        // first stage in order whose elements are still outstanding wins.
+        // the first stage in order that claims something and has not already
+        // been submitted wins.
+        //
+        // `outstanding` is a static declaration, not a shrinking to-do list:
+        // it comes back byte-identical after a successful submit (see
+        // GoApiClient.completedStagesByInstance). Filtering on it alone would
+        // re-pick stage one forever, so `completed` is what actually advances
+        // the journey.
+        // The document stage holds until Go has finished with the document.
+        //
+        // Document Classification reads side 1 and, for a two-sided type (a
+        // driving licence, a residence permit), asks for the back. That answer
+        // does not come back with the submit: for the first few seconds the
+        // fetch still says LazySide2CollectionRequired — the pre-capture
+        // state — and only then settles on Side2Required or Side2Done
+        // (measured at about three seconds on the live tenant, 2026-09-10).
+        //
+        // Advancing during that window is what broke Facematch. The customer
+        // reached the selfie screen and submitted it, then Side2Required
+        // arrived, the back-of-document screen opened after the selfie, and
+        // that later submit replaced subject.biometrics with the document's
+        // own anchorImage — leaving Selfie/selfieImage outstanding and
+        // Facematch with nothing to compare, so it never ran.
+        //
+        // So while the document is unresolved the stage stays put: showing
+        // the back-of-document screen once Go asks for it, and the processing
+        // screen while Go is still deciding. Both keep the selfie screen out
+        // of reach until the document is genuinely finished.
+        //
+        // Read from Go's own `outstanding`, never the collects-substituted
+        // list above: `collects` names PrimaryDocument/side2Image on every
+        // fetch from the first, and testing that would open the back screen
+        // before the front had been captured.
+        java.util.Optional<ScreenPlanProperties.Stage> documentStage = screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst();
+        boolean side1Submitted = documentStage.isPresent() && completed.contains(documentStage.get().name());
+
+        if (documentStage.isPresent() && side1Submitted) {
+            if (side2Required(response.outstanding(), response.instructions())) {
+                return toStagedInteraction(interactionId, documentStage.get().asSecondSide(),
+                        outstanding, completed, requiredRefs);
+            }
+            // Classification has not answered yet. Waiting is the only correct
+            // move — the alternative is guessing, and guessing wrong costs the
+            // customer their selfie.
+            if (side2Undecided(response.instructions())) {
+                return processingInteraction(interactionId);
+            }
+        }
+
+        // Every configured stage submitted, while Go still lists the elements
+        // they collect. That is the end of the collection phase on a journey
+        // whose `outstanding` never shrinks — the modules are running, and the
+        // decision arrives by polling getState. Without this the fall-through
+        // below reads those still-listed elements as unclaimed and renders the
+        // generic form, putting a raw field dump after the last real screen.
+        boolean planConfigured = !screenPlan.stages().isEmpty();
+        boolean everyStageSubmitted = planConfigured && screenPlan.stages().stream()
+                .allMatch(stage -> completed.contains(stage.name()));
+        if (everyStageSubmitted) {
+            return processingInteraction(interactionId);
+        }
+
         return screenPlan.stages().stream()
-                .filter(stage -> stage.claims(outstanding))
+                .filter(stage -> !completed.contains(stage.name()))
+                // Claimed, or configured to run regardless: a journey that
+                // collects an element lazily never lists it, but still accepts
+                // it (see Stage.alwaysCollects).
+                .filter(stage -> stage.claims(outstanding) || stage.alwaysCollects())
                 .findFirst()
-                .map(stage -> toStagedInteraction(interactionId, stage, outstanding))
+                .map(stage -> toStagedInteraction(interactionId, stage, outstanding, completed, requiredRefs))
                 // The plan doesn't recognise everything that's outstanding (e.g. a
                 // module restored after the plan was written, or no plan configured
                 // at all for this market yet). Falling back to Processing here — as
@@ -147,7 +267,8 @@ public class DefaultInteractionMapper {
 
     /** One screen from the plan, with a rail showing where the customer has got to. */
     private Interaction toStagedInteraction(String interactionId, ScreenPlanProperties.Stage stage,
-                                            List<String> outstanding) {
+                                            List<String> outstanding, java.util.Set<String> completed,
+                                            java.util.Set<String> requiredRefs) {
         boolean reachedCurrent = false;
         List<StagePlanEntry> rail = new java.util.ArrayList<>();
         for (ScreenPlanProperties.Stage planStage : screenPlan.stages()) {
@@ -155,8 +276,24 @@ public class DefaultInteractionMapper {
             if (planStage.stage().equals(stage.stage())) {
                 state = StageState.ACTIVE;
                 reachedCurrent = true;
+            } else if (reachedCurrent) {
+                state = StageState.UPCOMING;
             } else {
-                state = reachedCurrent ? StageState.UPCOMING : StageState.DONE;
+                // Before the active stage. Done on either signal, because
+                // journeys differ in which one arrives: this service recorded
+                // the submit, or Go satisfied the elements and stopped listing
+                // them (Meridian's `outstanding` shrinks; Northbank's, a static
+                // declaration, never does).
+                //
+                // A stage the customer skipped past — still collectable, never
+                // submitted — stays UPCOMING rather than DONE: the front end's
+                // vocabulary is done | active | upcoming (onboarding-core
+                // types.ts) with no "skipped", and UPCOMING is the honest half
+                // of that choice. An always-collect stage is never "satisfied"
+                // by absence either, since it was never listed to begin with.
+                boolean submitted = completed.contains(planStage.name());
+                boolean satisfied = !planStage.alwaysCollects() && !planStage.claims(outstanding);
+                state = submitted || satisfied ? StageState.DONE : StageState.UPCOMING;
             }
             rail.add(new StagePlanEntry(planStage.stage(), state));
         }
@@ -173,7 +310,7 @@ public class DefaultInteractionMapper {
                 null,
                 stage.captureType(),
                 stage.accepted(),
-                stage.kind() == ScreenKind.FORM ? fieldsFor(stage, outstanding) : null,
+                stage.kind() == ScreenKind.FORM ? fieldsFor(stage, outstanding, requiredRefs) : null,
                 null,
                 stage.kind() == ScreenKind.CONSENT ? screenPlan.consentChecks() : null,
                 stage.modules(),
@@ -189,11 +326,189 @@ public class DefaultInteractionMapper {
      * restored — see application-meridian-health.yml) without rewriting this
      * class.
      */
-    private List<FieldSchema> fieldsFor(ScreenPlanProperties.Stage stage, List<String> outstanding) {
-        return outstanding.stream()
-                .filter(o -> o.startsWith(stage.prefix()))
-                .map(o -> FieldSchema.of(o, label(o), null))
+    private List<FieldSchema> fieldsFor(ScreenPlanProperties.Stage stage, List<String> outstanding,
+                                        java.util.Set<String> requiredRefs) {
+        // Prefer the refs the journey marks required, but never render an empty
+        // screen.
+        //
+        // `collects` carries every optional field alongside the required ones —
+        // CurrentAddress lists 17, of which 5 are required — and rendering all
+        // of them puts a dozen boxes (postBox, doubleDependentLocality,
+        // superAdministrativeArea …) on a screen nobody is asked to fill in.
+        // But a stage can legitimately claim only optional refs: the personal
+        // details this journey collects (MothersMaidenName, Gender,
+        // NationalInsuranceNumber) are all spec=optional, and filtering them
+        // out leaves a form with a heading, a Continue button and nothing to
+        // type into. So required-only when the stage has any, everything it
+        // claims otherwise, and the field's own `required` flag carries the
+        // distinction to the front end.
+        List<String> claimed = outstanding.stream()
+                .filter(stage::claimsRef)
                 .toList();
+        List<String> required = claimed.stream().filter(requiredRefs::contains).toList();
+        List<String> shown = required.isEmpty() ? claimed : required;
+
+        return shown.stream()
+                .map(o -> new FieldSchema(o, label(o), TYPES.get(o), PLACEHOLDERS.get(o),
+                        HELPER_TEXT.get(o), requiredRefs.isEmpty() || requiredRefs.contains(o)))
+                .toList();
+    }
+
+    /**
+     * Input types for elements the front end can render more helpfully than a
+     * plain text box. Its FieldSchema type vocabulary is text | date | tel |
+     * email | postcode (onboarding-core types.ts) — there is no select, so a
+     * coded field is a text box plus the guidance below.
+     */
+    private static final Map<String, String> TYPES = Map.ofEntries(
+            Map.entry("CurrentAddress/postalCode", "postcode"),
+            Map.entry("DateOfBirth", "date"),
+            Map.entry("MobilePhone/number", "tel"),
+            Map.entry("PersonalEmail/email", "email"),
+            Map.entry("WorkEmail/email", "email")
+    );
+
+    /**
+     * Guidance for fields Go validates against a format the label alone does
+     * not convey. Country is the one that actually bites: Go requires
+     * /^[A-Z]{2,3}$/, so "United Kingdom" is rejected with a 400 that reaches
+     * the customer as a Continue button that does nothing.
+     */
+    private static final Map<String, String> HELPER_TEXT = Map.ofEntries(
+            Map.entry("CurrentAddress/country", "Three-letter country code, e.g. GBR")
+    );
+
+    private static final Map<String, String> PLACEHOLDERS = Map.ofEntries(
+            Map.entry("CurrentAddress/country", "GBR"),
+            Map.entry("CurrentAddress/postalCode", "SW1A 2AA")
+    );
+
+    /**
+     * Whether the capture screen now being submitted is the document one.
+     *
+     * TRUE for a document stage, FALSE for any other capture stage, and null
+     * when no configured stage is current — the caller then falls back to
+     * reading {@code outstanding} directly, which is all a market with no
+     * screen plan has to go on.
+     *
+     * Selected by the same rule that rendered the screen, so the classification
+     * and the screen cannot disagree. Reading {@code outstanding} for a
+     * {@code PrimaryDocument/} entry instead is wrong on a journey that
+     * collects the document lazily and so never lists it: every capture then
+     * looks like a selfie, and the document image is submitted as
+     * {@code subject.biometrics} where Document Classification never sees it.
+     */
+    public Boolean currentCaptureIsDocument(List<String> outstanding, java.util.Set<String> completed) {
+        List<String> listed = outstanding == null ? List.of() : outstanding;
+        return screenPlan.stages().stream()
+                .filter(stage -> !completed.contains(stage.name()))
+                .filter(stage -> stage.claims(listed) || stage.alwaysCollects())
+                .filter(stage -> stage.kind() == ScreenKind.CAPTURE || stage.kind() == ScreenKind.UPLOAD)
+                .findFirst()
+                .map(stage -> "document".equalsIgnoreCase(stage.captureType())
+                        || stage.prefix().startsWith("PrimaryDocument"))
+                .orElse(null);
+    }
+
+    /**
+     * The plan stage a submit answers, or null if none matches.
+     *
+     * Matched on the submitted field names: a FORM stage's fields are named
+     * after the domain element refs it claims ({@code CurrentAddress/postalCode}),
+     * so the stage prefix identifies them directly. Capture and consent screens
+     * send short names instead ({@code selfieImage}, {@code documentImage}),
+     * which carry no prefix — those fall back to the first not-yet-completed
+     * stage whose capture type or kind fits, which is the stage the customer
+     * was being shown.
+     *
+     * Returns null rather than guessing when nothing matches: the caller only
+     * records progress for a real match, so an unrecognised submit leaves the
+     * journey where it was instead of silently skipping a screen.
+     */
+    public String stageFor(java.util.Collection<String> submittedKeys, java.util.Set<String> completed) {
+        if (submittedKeys == null || submittedKeys.isEmpty()) {
+            return null;
+        }
+        List<ScreenPlanProperties.Stage> remaining = screenPlan.stages().stream()
+                .filter(s -> !completed.contains(s.name()))
+                .toList();
+
+        // A prefixed field name identifies its stage outright.
+        for (ScreenPlanProperties.Stage stage : remaining) {
+            for (String key : submittedKeys) {
+                if (stage.claimsRef(key)) {
+                    return stage.name();
+                }
+            }
+        }
+
+        // Short names from a capture or consent screen: the element the stage
+        // collects is in the prefix, so match its leaf against the key.
+        for (ScreenPlanProperties.Stage stage : remaining) {
+            String element = stage.prefix().endsWith("/")
+                    ? stage.prefix().substring(0, stage.prefix().length() - 1)
+                    : stage.prefix();
+            for (String key : submittedKeys) {
+                if (key == null) continue;
+                boolean selfie = "Selfie".equals(element) && key.toLowerCase(Locale.ROOT).contains("selfie");
+                boolean document = "PrimaryDocument".equals(element) && key.toLowerCase(Locale.ROOT).contains("document");
+                boolean consent = "Consent".equals(element)
+                        && (stage.kind() == ScreenKind.CONSENT || key.toLowerCase(Locale.ROOT).contains("consent"));
+                if (selfie || document || consent) {
+                    return stage.name();
+                }
+            }
+        }
+
+        // A consent screen submits its checkbox names, which match nothing
+        // above. It is the only kind whose payload need not name its element,
+        // so an unmatched submit belongs to the first outstanding consent stage.
+        return remaining.stream()
+                .filter(s -> s.kind() == ScreenKind.CONSENT)
+                .map(ScreenPlanProperties.Stage::name)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * Whether Go is waiting for the back of the document.
+     *
+     * Two signals, either of which is enough. Go names
+     * {@code PrimaryDocument/side2Image} in {@code outstanding} once
+     * Classification has read side 1 and found a two-sided document type, and
+     * separately instructs {@code Side2Required}. The instruction is the
+     * clearer of the two, but it travels alongside {@code Side2Done} and
+     * {@code LazySide2CollectionRequired} on the same journey at different
+     * points, so both are read rather than relying on either alone.
+     *
+     * {@code LazySide2CollectionRequired} deliberately does not count: it is
+     * the pre-capture state, present from the very first fetch, and treating
+     * it as a request for side 2 would show the back-of-document screen before
+     * the front had been taken.
+     */
+    private static boolean side2Required(List<String> outstanding, List<String> instructions) {
+        if (outstanding != null && outstanding.contains("PrimaryDocument/side2Image")) {
+            return true;
+        }
+        return instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+    }
+
+    /**
+     * Whether Go has yet to say whether it wants the back of the document.
+     *
+     * {@code LazySide2CollectionRequired} is the pre-decision state: it is
+     * present from the very first fetch of a journey that *might* want a
+     * second side, and stays there for the few seconds Document
+     * Classification takes to read side 1. It is replaced by
+     * {@code Side2Required} or {@code Side2Done} once that answer exists.
+     *
+     * Only meaningful once side 1 has been submitted — before that it means
+     * "this journey can take a second side", not "an answer is pending" —
+     * which is why the caller checks it inside that branch and not on its own.
+     */
+    private static boolean side2Undecided(List<String> instructions) {
+        return instructions != null
+                && instructions.stream().anyMatch("LazySide2CollectionRequired"::equalsIgnoreCase);
     }
 
     /** A human label for a domain element ref, falling back to a de-camel-cased leaf. */

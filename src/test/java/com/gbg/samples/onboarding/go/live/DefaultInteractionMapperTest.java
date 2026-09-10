@@ -13,6 +13,7 @@ import com.gbg.samples.onboarding.go.live.dto.GoStateResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -21,12 +22,12 @@ class DefaultInteractionMapperTest {
     private static final ScreenPlanProperties.Stage DOCUMENT_STAGE = new ScreenPlanProperties.Stage(
             "document", ScreenKind.CAPTURE, "PrimaryDocument/", "Document",
             "Scan your photo ID", "We check the document is genuine.", "Scan document", "document",
-            List.of("Passport"), List.of("Document Classification"));
+            List.of("Passport"), List.of("Document Classification"), null, null);
 
     private static final ScreenPlanProperties.Stage BIOMETRICS_STAGE = new ScreenPlanProperties.Stage(
             "biometrics", ScreenKind.CAPTURE, "Selfie/", "Biometrics",
             "Take a selfie", "This proves you are the person in the document.", "Take selfie", "selfie",
-            null, List.of("Liveness Verification"));
+            null, List.of("Liveness Verification"), null, null);
 
     private static final ScreenPlanProperties TWO_STAGE_PLAN =
             new ScreenPlanProperties(List.of(DOCUMENT_STAGE, BIOMETRICS_STAGE), List.of());
@@ -78,6 +79,134 @@ class DefaultInteractionMapperTest {
         assertThat(interaction.collects().get(0).label()).isEqualTo("Date of issue");
     }
 
+    // --- Progress against a journey whose `outstanding` never shrinks ---
+
+    /**
+     * The Northbank journey on gbggo4-demo returns a byte-identical
+     * `outstanding` after a successful submit — it declares what the journey
+     * collects rather than what is still missing. Selecting on it alone
+     * re-picks the first stage forever, which reaches the customer as a
+     * Continue button that does nothing.
+     */
+    @Test
+    void aSubmittedStageIsNotShownAgainWhenOutstandingNeverShrinks() {
+        List<String> unchanging = List.of("PrimaryDocument/side1Image", "Selfie/selfieImage");
+
+        Interaction first = mapper.toInteraction(fetchResponseWithOutstanding(unchanging), Set.of());
+        assertThat(first.stage()).isEqualTo("Document");
+
+        Interaction afterDocument = mapper.toInteraction(
+                fetchResponseWithOutstanding(unchanging), Set.of("document"));
+
+        assertThat(afterDocument.stage()).isEqualTo("Biometrics");
+        assertThat(afterDocument.stagePlan()).containsExactly(
+                new StagePlanEntry("Document", StageState.DONE),
+                new StagePlanEntry("Biometrics", StageState.ACTIVE));
+    }
+
+    @Test
+    void everyStageSubmittedLeavesNothingToRenderAndFallsThroughToProcessing() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponseWithOutstanding(List.of("PrimaryDocument/side1Image", "Selfie/selfieImage")),
+                Set.of("document", "biometrics"));
+
+        assertThat(interaction.kind()).isEqualTo(ScreenKind.PROCESSING);
+    }
+
+    /**
+     * Northbank's journey collects its document lazily: `outstanding` never
+     * names PrimaryDocument/, yet Go accepts a document submission. Selecting
+     * on `outstanding` alone skips the ID scan and sends the customer from
+     * address straight to selfie.
+     */
+    @Test
+    void anAlwaysCollectStageRendersEvenThoughGoNeverListsItsElements() {
+        ScreenPlanProperties.Stage lazyDocument = new ScreenPlanProperties.Stage(
+                "document", ScreenKind.CAPTURE, "PrimaryDocument/", "Document",
+                "Scan your photo ID", "We check the document is genuine.", "Scan document", "document",
+                List.of("Passport"), List.of("Document Classification"), true, null);
+        DefaultInteractionMapper lazyMapper = new DefaultInteractionMapper(
+                new ScreenPlanProperties(List.of(lazyDocument, BIOMETRICS_STAGE), List.of()));
+
+        Interaction interaction = lazyMapper.toInteraction(
+                fetchResponseWithOutstanding(List.of("Selfie/selfieImage")), Set.of());
+
+        assertThat(interaction.stage()).isEqualTo("Document");
+        assertThat(interaction.stagePlan()).containsExactly(
+                new StagePlanEntry("Document", StageState.ACTIVE),
+                new StagePlanEntry("Biometrics", StageState.UPCOMING));
+
+        // And it advances once submitted, rather than repeating.
+        Interaction next = lazyMapper.toInteraction(
+                fetchResponseWithOutstanding(List.of("Selfie/selfieImage")), Set.of("document"));
+        assertThat(next.stage()).isEqualTo("Biometrics");
+    }
+
+    @Test
+    void anOrdinaryStageIsStillSkippedWhenGoDoesNotListItsElements() {
+        // The default, and what keeps a retired module from rendering a dead
+        // screen: only always-collect opts out of the outstanding check.
+        Interaction interaction = mapper.toInteraction(
+                fetchResponseWithOutstanding(List.of("Selfie/selfieImage")), Set.of());
+
+        assertThat(interaction.stage()).isEqualTo("Biometrics");
+    }
+
+    // --- currentCaptureIsDocument: which capture an attachmentRef is ---
+
+    /**
+     * The browser posts {@code {attachmentRef}} with no hint of which capture
+     * it is. Classifying that by looking for PrimaryDocument/ in `outstanding`
+     * sends a document photo to subject.biometrics on a journey that collects
+     * the document lazily — Document Classification never receives an image.
+     */
+    @Test
+    void aLazilyCollectedDocumentCaptureIsNotMistakenForASelfie() {
+        ScreenPlanProperties.Stage lazyDocument = new ScreenPlanProperties.Stage(
+                "document", ScreenKind.CAPTURE, "PrimaryDocument/", "Document",
+                "Scan your photo ID", "We check the document is genuine.", "Scan document", "document",
+                List.of("Passport"), List.of("Document Classification"), true, null);
+        DefaultInteractionMapper lazyMapper = new DefaultInteractionMapper(
+                new ScreenPlanProperties(List.of(lazyDocument, BIOMETRICS_STAGE), List.of()));
+
+        // Go lists only the selfie, yet the document screen is the one showing.
+        assertThat(lazyMapper.currentCaptureIsDocument(List.of("Selfie/selfieImage"), Set.of())).isTrue();
+        // Once the document is submitted, the same call classifies the selfie.
+        assertThat(lazyMapper.currentCaptureIsDocument(List.of("Selfie/selfieImage"), Set.of("document"))).isFalse();
+    }
+
+    @Test
+    void captureClassificationDefersToOutstandingWhenNoStageIsCurrent() {
+        DefaultInteractionMapper noPlanMapper =
+                new DefaultInteractionMapper(new ScreenPlanProperties(List.of(), List.of()));
+
+        assertThat(noPlanMapper.currentCaptureIsDocument(List.of("PrimaryDocument/side1Image"), Set.of())).isNull();
+    }
+
+    // --- stageFor: which stage a submit answers ---
+
+    @Test
+    void aPrefixedFormFieldIdentifiesItsStage() {
+        assertThat(mapper.stageFor(List.of("PrimaryDocument/side1Image"), Set.of())).isEqualTo("document");
+    }
+
+    @Test
+    void aShortCaptureFieldNameIdentifiesItsStage() {
+        assertThat(mapper.stageFor(List.of("selfieImage"), Set.of())).isEqualTo("biometrics");
+        assertThat(mapper.stageFor(List.of("documentImage"), Set.of())).isEqualTo("document");
+    }
+
+    @Test
+    void anAlreadyCompletedStageIsNotMatchedAgain() {
+        assertThat(mapper.stageFor(List.of("selfieImage"), Set.of("biometrics"))).isNull();
+    }
+
+    @Test
+    void anEmptyOrUnrecognisedSubmitMatchesNoStage() {
+        assertThat(mapper.stageFor(List.of(), Set.of())).isNull();
+        assertThat(mapper.stageFor(List.of("somethingElse"), Set.of())).isNull();
+    }
+
     @Test
     void emptyPlanFallsBackToAGenericFormRatherThanCrashing() {
         DefaultInteractionMapper noPlanMapper = new DefaultInteractionMapper(new ScreenPlanProperties(List.of(), List.of()));
@@ -89,9 +218,94 @@ class DefaultInteractionMapperTest {
     }
 
     private static GoInteractionFetchResponse fetchResponseWithOutstanding(List<String> outstanding) {
+        return fetchResponse(outstanding, null);
+    }
+
+    private static GoInteractionFetchResponse fetchResponse(List<String> outstanding, List<String> instructions) {
         return new GoInteractionFetchResponse(
                 "instance-1", new GoInteractionFetchResponse.Journey("InProgress"), "int-1",
-                null, false, outstanding, null, null);
+                null, false, outstanding, instructions, null);
+    }
+
+    // --- Side 2: the back of a two-sided document ---
+
+    /**
+     * Classification reads side 1, finds a two-sided document type, and asks
+     * for the back — after the document stage was submitted. Skipping it (the
+     * stage is "completed") shows the selfie while Go waits for a side that
+     * never arrives, and the journey deadlocks in collection.
+     */
+    @Test
+    void goAskingForTheBackOfTheDocumentReopensTheDocumentStage() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage", "PrimaryDocument/side2Image"), List.of("Side2Required")),
+                Set.of("document"));
+
+        assertThat(interaction.kind()).isEqualTo(ScreenKind.CAPTURE);
+        assertThat(interaction.stage()).isEqualTo("Document");
+        assertThat(interaction.title()).isEqualTo("Now the other side");
+        assertThat(interaction.captureType()).isEqualTo("document-back");
+    }
+
+    @Test
+    void theInstructionAloneIsEnoughToAskForTheBack() {
+        // Go carries Side2Required without necessarily listing side2Image.
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage"), List.of("Side2Required")), Set.of("document"));
+
+        assertThat(interaction.captureType()).isEqualTo("document-back");
+    }
+
+    @Test
+    void lazySide2CollectionRequiredIsNotARequestForTheBack() {
+        // The pre-capture state, present from the first fetch. Treating it as
+        // a request would show the back screen before the front was taken.
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("PrimaryDocument/side1Image", "Selfie/selfieImage"),
+                        List.of("LazySide2CollectionRequired")),
+                Set.of());
+
+        assertThat(interaction.title()).isEqualTo("Scan your photo ID");
+        assertThat(interaction.captureType()).isEqualTo("document");
+    }
+
+    /**
+     * The answer to "does this document have a back?" does not arrive with
+     * the submit — for a few seconds the fetch still carries the pre-decision
+     * LazySide2CollectionRequired. Advancing on that stale instruction shows
+     * the selfie screen, and the side-2 submit that follows the selfie
+     * replaces subject.biometrics with the document's anchorImage, leaving
+     * Facematch with no selfie to compare.
+     */
+    @Test
+    void theDocumentStageHoldsWhileClassificationHasNotAnsweredYet() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage"), List.of("LazySide2CollectionRequired")),
+                Set.of("document"));
+
+        assertThat(interaction.kind()).isEqualTo(ScreenKind.PROCESSING);
+        assertThat(interaction.stage()).isNotEqualTo("Biometrics");
+    }
+
+    @Test
+    void theHoldOnlyAppliesOnceSideOneHasBeenSubmitted() {
+        // Before the document is captured the same instruction means "this
+        // journey can take a second side", not "an answer is pending".
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("PrimaryDocument/side1Image", "Selfie/selfieImage"),
+                        List.of("LazySide2CollectionRequired")),
+                Set.of());
+
+        assertThat(interaction.stage()).isEqualTo("Document");
+        assertThat(interaction.captureType()).isEqualTo("document");
+    }
+
+    @Test
+    void sideTwoDoneLeavesTheJourneyMovingOn() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage"), List.of("Side2Done")), Set.of("document"));
+
+        assertThat(interaction.stage()).isEqualTo("Biometrics");
     }
 
     // --- toRecord: module-level verdicts (mapModuleState) ---

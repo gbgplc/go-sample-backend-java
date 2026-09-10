@@ -26,7 +26,7 @@ class ScreenPlanPropertiesValidationTest {
         ScreenPlanProperties.Stage stage = new ScreenPlanProperties.Stage(
                 "document", ScreenKind.CAPTURE, null, "Document",
                 "Scan your photo ID", "We check the document is genuine.", "Scan document", "document",
-                null, null);
+                null, null, null, null);
 
         Set<ConstraintViolation<ScreenPlanProperties.Stage>> violations = validator.validate(stage);
 
@@ -38,7 +38,7 @@ class ScreenPlanPropertiesValidationTest {
         ScreenPlanProperties.Stage stage = new ScreenPlanProperties.Stage(
                 "document", ScreenKind.CAPTURE, "PrimaryDocument/", " ",
                 "Scan your photo ID", "We check the document is genuine.", "Scan document", "document",
-                null, null);
+                null, null, null, null);
 
         Set<ConstraintViolation<ScreenPlanProperties.Stage>> violations = validator.validate(stage);
 
@@ -50,7 +50,7 @@ class ScreenPlanPropertiesValidationTest {
         ScreenPlanProperties.Stage stage = new ScreenPlanProperties.Stage(
                 "document", ScreenKind.CAPTURE, "PrimaryDocument/", "Document",
                 "Scan your photo ID", "We check the document is genuine.", "Scan document", "document",
-                null, null);
+                null, null, null, null);
 
         assertThat(validator.validate(stage)).isEmpty();
     }
