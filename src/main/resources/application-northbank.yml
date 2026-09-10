@@ -10,6 +10,129 @@ app:
   accent-soft: "#F5F5FC"
   help-line: "Call 0800 000 000, or carry on in a branch with the same reference."
   journey-name: UK retail account opening
-  resource-id: jny_uk_retail_cdd@latest
+  resource-id: f3d875bc2ebff66f557fb177646f4c80e453d8d064b92a53fd1079edded1ea91@5q2gadns
   cors-allowed-origins:
     - http://localhost:3000
+    # 3000 is the app's pinned port; 3010 is a fallback for when something
+    # else already holds 3000. An app on an origin not listed here has every
+    # request rejected as CORS, which surfaces as "Something went wrong on
+    # our end" with nothing in the backend log.
+    - http://localhost:3010
+
+# The gbggo4-demo nonprod tenant. Still inert unless go.mode=live — set that,
+# and the four credentials below, in an untracked .env.local or via env vars.
+#
+# Note the two hosts differ: the Keycloak realm has no region segment, the API
+# host does (-eu). That is not a typo.
+go:
+  auth-url: https://gbggo4-demo.nonprod.fabric.gbgplatforms.com/auth/realms/go/protocol/openid-connect/token
+  base-url: https://gbggo4-demo-eu.nonprod.fabric.gbgplatforms.com/v2/captain/
+  grant-type: password
+  scope: openid
+  client-id: ${GBG_CLIENT_ID:}
+  client-secret: ${GBG_CLIENT_SECRET:}
+  username: ${GBG_USERNAME:}
+  password: ${GBG_PASSWORD:}
+
+# Live-mode screens for this journey (DefaultInteractionMapper): which domain
+# element each screen collects, in collection order.
+#
+# Written against the journey published on gbggo4-demo
+# (resource f3d875bc…@unvq6jc2) from what a live fetch returns — verified
+# 2026-09-10. Go returns one interaction (`segment1`) covering the whole
+# collection phase; splitting it into screens is the client's job under
+# `delivery: "api"`, and this plan is that decision. Without it the journey
+# renders as a single generic "A few more details" form.
+#
+# Stages match against the interaction's `collects` list, not `outstanding`.
+# `outstanding` carries only what Go is currently blocking on — six refs here,
+# against the 37 in `collects` — and omits every element whose parent is
+# optional. Matching on it drops the document, personal-details and
+# contact-details pages entirely, however this file is written.
+#
+# The journey's own six pages are welcome, personal_details, contact_details,
+# address_details (an AddressCard configured for Loqate lookup),
+# document_capture and biometrics_capture. The five collection pages map to
+# the five stages below; the welcome page is the app's own (WelcomeCard),
+# which is why no stage claims it.
+#
+# Order follows the module chain: identity and contact data before the address
+# Data Verification checks, document before selfie (Facematch compares the
+# selfie against the anchor image Document Classification produces). Go
+# enforces the module dependencies, not the collection order, but collecting
+# in module order keeps the progress rail honest.
+#
+# Copy matches apps/northbank/onboarding.config.ts so the live journey reads
+# like the mock.
+screen-plan:
+  stages:
+    # also-prefixes: one screen, several domain elements. Each of these is a
+    # separate top-level element in `collects`, so a single prefix would claim
+    # only the first and the screen would render one box out of three.
+    - name: personal
+      kind: form
+      prefix: MothersMaidenName
+      also-prefixes:
+        - Gender
+        - NationalInsuranceNumber
+      stage: About you
+      title: About you
+      body: We check these against trusted consumer and government data sources. No credit footprint.
+      cta: Continue
+      modules:
+        - Data Verification
+    - name: contact
+      kind: form
+      prefix: PersonalEmail/
+      also-prefixes:
+        - WorkEmail/
+        - MobilePhone/
+        - LandlinePhone/
+      stage: Contact details
+      title: How can we reach you?
+      body: We use these to confirm it is you and to keep you posted on your application.
+      cta: Continue
+    - name: details
+      kind: form
+      prefix: CurrentAddress/
+      stage: Your details
+      title: Your address
+      body: We check this against trusted consumer and government data sources. No credit footprint.
+      cta: Continue
+      # Fields, types and helper text come from the journey's own `collects`
+      # (DefaultInteractionMapper.fieldsFor), filtered to the required ones —
+      # CurrentAddress alone lists 17 fields, of which 5 are required.
+      modules:
+        - Data Verification
+    # always-collect: PrimaryDocument's parent is optional, so its refs are in
+    # `collects` but never in `outstanding`, and the fetch carries instruction
+    # "LazySide2CollectionRequired". The stage is selected on `collects` now,
+    # so this is belt-and-braces for a journey that stops listing them.
+    - name: document
+      kind: capture
+      prefix: PrimaryDocument/
+      always-collect: true
+      stage: Document
+      title: Scan your photo ID
+      body: Hold the document flat and fill the frame. Where your document has a chip, we read it for a stronger result.
+      cta: Scan document
+      capture-type: document
+      accepted:
+        - Passport
+        - Driving licence
+        - Biometric residence permit
+      modules:
+        - Document Classification
+        - Document Extraction
+        - Document Authentication
+    - name: biometrics
+      kind: capture
+      prefix: Selfie/
+      stage: Biometrics
+      title: Take a selfie
+      body: We confirm a real person is present, then compare your face with the photo on your document.
+      cta: Take selfie
+      capture-type: selfie
+      modules:
+        - Liveness Verification
+        - Facematch Verification
