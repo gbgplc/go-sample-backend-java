@@ -123,7 +123,11 @@ public class MockGoClient implements GoClient {
                 s.getCta() == null ? "Done" : s.getCta(),
                 s.getModuleRuns() == null ? List.of() : s.getModuleRuns(),
                 s.getSummary() == null ? List.of() : s.getSummary(),
-                s.getRecordNote()
+                s.getRecordNote(),
+                // Every mock scenario is a designed outcome — a decision the
+                // journey actually reached. There is no "the platform broke"
+                // fixture for it to represent.
+                false
         );
     }
 
