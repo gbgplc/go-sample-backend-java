@@ -135,6 +135,10 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
             EMAIL_WORK,
             /** {@code idNumbers: [{type, idNumber}]} */
             ID_NUMBER,
+            /** {@code idNumbers: [{type: "SSN", idNumber}]} */
+            SSN,
+            /** {@code previousAddresses: [{addressString}]} */
+            PREVIOUS_ADDRESS,
             /** {@code documents: [{type, side1Image, side2Image}]} */
             DOCUMENT_SIDE1,
             DOCUMENT_SIDE2,
@@ -152,10 +156,25 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                 Map.entry("lastNames", new FieldMapping("FullName", new String[]{"identity", "lastNames"}, Wrap.NONE)),
                 Map.entry("dateOfBirth", new FieldMapping("DateOfBirth", new String[]{"identity", "dateOfBirth"}, Wrap.NONE)),
 
-                // Address. Go wants the components, not one free-text line —
-                // the journey lists building, thoroughfare, locality,
-                // postalCode and country as required whenever Data
-                // Verification is present.
+                // Address. Go wants the components, not one free-text line, and
+                // which of them are required is the journey's choice: Meridian
+                // and Northbank ask for building, thoroughfare, locality,
+                // postalCode and country, while Ridgeline also requires
+                // premise. Every component a market might mark required is
+                // mapped here, because an unmapped one falls through to the
+                // generic placement and Go rejects the submit — "Required
+                // domain element 'CurrentAddress/premise' data is missing from
+                // context" — on a screen the customer has already filled in.
+                Map.entry("premise", new FieldMapping("CurrentAddress",
+                        new String[]{"identity", "currentAddress", "premise"}, Wrap.NONE)),
+                Map.entry("subBuilding", new FieldMapping("CurrentAddress",
+                        new String[]{"identity", "currentAddress", "subBuilding"}, Wrap.NONE)),
+                Map.entry("dependentThoroughfare", new FieldMapping("CurrentAddress",
+                        new String[]{"identity", "currentAddress", "dependentThoroughfare"}, Wrap.NONE)),
+                Map.entry("dependentLocality", new FieldMapping("CurrentAddress",
+                        new String[]{"identity", "currentAddress", "dependentLocality"}, Wrap.NONE)),
+                Map.entry("addressString", new FieldMapping("CurrentAddress",
+                        new String[]{"identity", "currentAddress", "addressString"}, Wrap.NONE)),
                 Map.entry("building", new FieldMapping("CurrentAddress",
                         new String[]{"identity", "currentAddress", "building"}, Wrap.NONE)),
                 Map.entry("thoroughfare", new FieldMapping("CurrentAddress",
@@ -190,6 +209,16 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                         new FieldMapping("WorkEmail", new String[]{"identity", "emails"}, Wrap.EMAIL_WORK)),
                 Map.entry("MothersMaidenName",
                         new FieldMapping("MothersMaidenName", new String[]{"identity", "mothersMaidenName"}, Wrap.NONE)),
+                // idNumbers[] again, with the type naming which identifier it
+                // is — the same shape NationalInsuranceNumber uses below.
+                Map.entry("SSN",
+                        new FieldMapping("SSN", new String[]{"identity", "idNumbers"}, Wrap.SSN)),
+                // previousAddresses[] is an array of address objects. The
+                // screen collects one free-text line, which lands as that
+                // entry's addressString.
+                Map.entry("PreviousAddresses",
+                        new FieldMapping("PreviousAddresses",
+                                new String[]{"identity", "previousAddresses"}, Wrap.PREVIOUS_ADDRESS)),
                 Map.entry("Gender",
                         new FieldMapping("Gender", new String[]{"identity", "gender"}, Wrap.NONE)),
                 // idNumbers[] carries a type and the number itself, the same
@@ -287,6 +316,8 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                 case EMAIL_WORK -> append(cursor, leaf, Map.of("type", "work", "email", text));
                 case ID_NUMBER -> append(cursor, leaf,
                         Map.of("type", "NationalInsuranceNumber", "idNumber", text));
+                case SSN -> append(cursor, leaf, Map.of("type", "SSN", "idNumber", text));
+                case PREVIOUS_ADDRESS -> append(cursor, leaf, Map.of("addressString", text));
                 // Both document sides belong to one entry in documents[], so a
                 // second side merges into the existing object rather than
                 // appending a second document.

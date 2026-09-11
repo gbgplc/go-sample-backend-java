@@ -61,7 +61,11 @@ public class DefaultInteractionMapper {
             Map.entry("WorkEmail/email", "Work email"),
             Map.entry("MothersMaidenName", "Mother's maiden name"),
             Map.entry("NationalInsuranceNumber", "National Insurance number"),
-            Map.entry("Gender", "Gender")
+            Map.entry("Gender", "Gender"),
+            // De-camel-casing turns these into "Ssn" and "Previous addresses",
+            // one wrong and one merely clumsy for a field a customer reads.
+            Map.entry("SSN", "Social Security number"),
+            Map.entry("PreviousAddresses", "Previous address")
     );
 
     private final ScreenPlanProperties screenPlan;
@@ -427,7 +431,21 @@ public class DefaultInteractionMapper {
      */
     public String stageFor(java.util.Collection<String> submittedKeys, java.util.Set<String> completed) {
         if (submittedKeys == null || submittedKeys.isEmpty()) {
-            return null;
+            // An empty submit is a screen whose fields were all optional and
+            // all left blank — Ridgeline's sign-up offers four, none required.
+            // There are no field names to identify it by, but the customer
+            // pressed Continue on the screen they were being shown, which is
+            // the first stage not yet completed. Without this the journey
+            // re-picks that same screen and the Continue button does nothing.
+            //
+            // A capture or consent screen cannot reach here: both always
+            // submit something.
+            return screenPlan.stages().stream()
+                    .filter(s -> !completed.contains(s.name()))
+                    .filter(s -> s.kind() == ScreenKind.FORM)
+                    .map(ScreenPlanProperties.Stage::name)
+                    .findFirst()
+                    .orElse(null);
         }
         List<ScreenPlanProperties.Stage> remaining = screenPlan.stages().stream()
                 .filter(s -> !completed.contains(s.name()))
