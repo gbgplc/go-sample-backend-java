@@ -452,8 +452,15 @@ public class DefaultInteractionMapper {
                 if (key == null) continue;
                 boolean selfie = "Selfie".equals(element) && key.toLowerCase(Locale.ROOT).contains("selfie");
                 boolean document = "PrimaryDocument".equals(element) && key.toLowerCase(Locale.ROOT).contains("document");
-                boolean consent = "Consent".equals(element)
-                        && (stage.kind() == ScreenKind.CONSENT || key.toLowerCase(Locale.ROOT).contains("consent"));
+                // Deliberately not `|| stage.kind() == ScreenKind.CONSENT` here:
+                // that would match this stage against *any* key the instant the
+                // loop reaches a not-yet-completed consent stage — stealing a
+                // document/selfie short name meant for a later stage in this
+                // same pass. A consent screen's checkbox names, which really
+                // don't self-identify, are what the fallback below this loop is
+                // for; this branch only catches an explicit "...consent..."-named
+                // key.
+                boolean consent = "Consent".equals(element) && key.toLowerCase(Locale.ROOT).contains("consent");
                 if (selfie || document || consent) {
                     return stage.name();
                 }

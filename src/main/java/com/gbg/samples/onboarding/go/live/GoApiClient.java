@@ -89,6 +89,32 @@ public class GoApiClient implements GoClient {
             });
 
     /**
+     * The same {@code collects}-preferred-over-{@code outstanding} list
+     * {@link DefaultInteractionMapper#toInteraction} selects screens against,
+     * cached per instance so {@link #resolveAttachment} can classify a
+     * capture against the identical data the screen was rendered from.
+     *
+     * Kept separate from {@link #lastOutstandingByInstance}, which stays raw
+     * on purpose: the side-2 check in {@code resolveAttachment} needs Go's
+     * real {@code outstanding} (collects lists {@code PrimaryDocument/side2Image}
+     * from the first fetch, which would open the back-of-document screen
+     * before the front had been captured). Using the raw list here instead
+     * was the bug — a document whose parent is optional (Meridian's and
+     * Northbank's {@code PrimaryDocument} both are) never appears in it, so
+     * {@code currentCaptureIsDocument} always returned null and the fallback
+     * heuristic below it failed the same way, submitting the document photo
+     * as {@code selfieImage}. Document Classification then never receives an
+     * image and the journey cannot progress past that screen.
+     */
+    private final Map<String, List<String>> lastCollectableByInstance = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, List<String>> eldest) {
+                    return size() > MAX_CACHED_INSTANCES;
+                }
+            });
+
+    /**
      * Stage names already submitted, per Go instance — the journey's progress.
      *
      * Go's {@code outstanding} list is a static declaration of everything the
@@ -158,6 +184,14 @@ public class GoApiClient implements GoClient {
         if (response.instructions() != null) {
             lastInstructionsByInstance.put(instanceId, response.instructions());
         }
+        // Same precedence as toInteraction below: collects when the
+        // interaction carries any, otherwise raw outstanding.
+        List<String> collectable = response.collects().stream()
+                .map(GoInteractionFetchResponse.Collect::ref)
+                .toList();
+        lastCollectableByInstance.put(instanceId, collectable.isEmpty()
+                ? (response.outstanding() == null ? List.of() : response.outstanding())
+                : collectable);
         Interaction interaction = mapper.toInteraction(response, completedStages(instanceId));
         return new SubmitInteractionResponse(statusFrom(interaction), interaction);
     }
@@ -315,10 +349,15 @@ public class GoApiClient implements GoClient {
             return back;
         }
 
-        Boolean capturingDocument = mapper.currentCaptureIsDocument(outstanding, completedStages(instanceId));
+        // The collects-preferred list, not the raw `outstanding` above: a
+        // document (or other capture) whose parent is optional only ever
+        // appears in collects, so classifying against raw outstanding alone
+        // always misses it and misroutes the capture as a selfie.
+        List<String> collectable = lastCollectableByInstance.getOrDefault(instanceId, outstanding);
+        Boolean capturingDocument = mapper.currentCaptureIsDocument(collectable, completedStages(instanceId));
         boolean document = capturingDocument != null
                 ? capturingDocument
-                : outstanding.stream().anyMatch(o -> o.startsWith("PrimaryDocument/"));
+                : collectable.stream().anyMatch(o -> o.startsWith("PrimaryDocument/"));
 
         log.debug("Capture routed as {}: instance={} completed={} outstanding={}",
                 document ? "DOCUMENT" : "SELFIE", instanceId, completedStages(instanceId), outstanding);
