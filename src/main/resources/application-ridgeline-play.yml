@@ -10,6 +10,126 @@ app:
   accent-soft: "#FFEDE5"
   help-line: "Live chat is open 24 hours. Safer gambling tools are in Account."
   journey-name: GB player onboarding
-  resource-id: jny_gb_player_kyc@latest
+  resource-id: 1d10f195ec2d11e2d7a2d5ca8f2b77ebe4e940da102f857b300102fa0b2e4cde@5juix16t
   cors-allowed-origins:
     - http://localhost:3002
+
+# The gbggo4-demo nonprod tenant. Still inert unless go.mode=live — set that,
+# and the four credentials below, in an untracked .env.local or via env vars.
+#
+# Note the two hosts differ: the Keycloak realm has no region segment, the API
+# host does (-eu). That is not a typo.
+go:
+  auth-url: https://gbggo4-demo.nonprod.fabric.gbgplatforms.com/auth/realms/go/protocol/openid-connect/token
+  base-url: https://gbggo4-demo-eu.nonprod.fabric.gbgplatforms.com/v2/captain/
+  grant-type: password
+  scope: openid
+  client-id: ${GBG_CLIENT_ID:}
+  client-secret: ${GBG_CLIENT_SECRET:}
+  username: ${GBG_USERNAME:}
+  password: ${GBG_PASSWORD:}
+
+# Live-mode screens for this journey (DefaultInteractionMapper): which domain
+# elements map to which screen, in collection order.
+#
+# Written against the journey published on gbggo4-demo
+# (resource 1d10f195…@5juix16t) from what a live fetch returns — verified
+# 2026-09-11. Stages match against the interaction's `collects` list, which
+# names 38 refs across seven pages; `outstanding` is the narrower field and
+# omits any element whose parent is optional, so matching on that alone drops
+# pages the journey really has.
+#
+# Re-read `collects` after every republish rather than assuming the shape
+# holds. This journey has changed twice under the same resource: one version
+# dropped Selfie entirely, and this one added contact details, previous
+# addresses, identity and contact fields, and grew the required address from
+# three components to six — premise, building, thoroughfare, locality,
+# postalCode and country. A stage written against the old shape submits an
+# incomplete address, and the journey stalls on a screen the customer has
+# already filled in.
+#
+# Order follows the journey's own pages, and document precedes selfie because
+# Facematch compares the selfie against the anchor image Document
+# Classification produces. Go enforces the module dependency, not the
+# collection order, but collecting in module order keeps the progress rail
+# honest.
+#
+# Copy matches apps/ridgeline-play/onboarding.config.ts so the live journey
+# reads like the mock. Note the mock's age-gate framing — a step-up only when
+# data alone cannot confirm age — is a design the published journey does not
+# have: it collects a document from everyone. The stages below describe what
+# the journey actually does.
+screen-plan:
+  stages:
+    # also-prefixes: one screen, several domain elements. Each is a separate
+    # top-level element in `collects`, so a single prefix would claim only the
+    # first and the screen would render one field out of two.
+    - name: personal
+      kind: form
+      prefix: Gender
+      also-prefixes:
+        - SSN
+        - MothersMaidenName
+        - NationalInsuranceNumber
+      stage: Sign up
+      title: About you
+      body: We check these against trusted data sources to confirm you are 18 or over.
+      cta: Continue
+    - name: contact
+      kind: form
+      prefix: PersonalEmail/
+      also-prefixes:
+        - MobilePhone/
+        - LandlinePhone/
+      stage: Contact
+      title: How can we reach you?
+      body: We use these to confirm it is you and to keep your account secure.
+      cta: Continue
+    # Fields, types and helper text come from the journey's own `collects`
+    # (DefaultInteractionMapper.fieldsFor), filtered to the required ones —
+    # CurrentAddress lists 18 fields here, of which six are required.
+    - name: address
+      kind: form
+      prefix: CurrentAddress/
+      stage: Address
+      title: Where do you live?
+      body: We check this against trusted data sources to confirm your age and identity.
+      cta: Continue
+      modules:
+        - Data Verification
+    # PreviousAddresses is one optional element, not a group, so this screen
+    # renders a single field. A gaming journey asks for address history
+    # because the age and identity check wants more than a current address.
+    - name: previous-addresses
+      kind: form
+      prefix: PreviousAddresses
+      stage: Address history
+      title: Where did you live before?
+      body: Add an earlier address if you have moved in the last three years.
+      cta: Continue
+    - name: document
+      kind: capture
+      prefix: PrimaryDocument/
+      stage: Document
+      title: Scan your photo ID
+      body: Passport or driving licence. Fill the frame and hold steady.
+      cta: Scan document
+      capture-type: document
+      accepted:
+        - Passport
+        - Driving licence
+      modules:
+        - Document Classification
+        - Document Extraction
+        - Document Authentication
+    - name: biometrics
+      kind: capture
+      prefix: Selfie/
+      stage: Biometrics
+      title: Take a selfie
+      body: This proves you are the person in the document.
+      cta: Take selfie
+      capture-type: selfie
+      modules:
+        - Liveness Verification
+        - Facematch Verification

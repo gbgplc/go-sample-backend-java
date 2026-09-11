@@ -202,9 +202,39 @@ class DefaultInteractionMapperTest {
     }
 
     @Test
-    void anEmptyOrUnrecognisedSubmitMatchesNoStage() {
-        assertThat(mapper.stageFor(List.of(), Set.of())).isNull();
+    void anUnrecognisedSubmitMatchesNoStage() {
         assertThat(mapper.stageFor(List.of("somethingElse"), Set.of())).isNull();
+    }
+
+    /**
+     * A screen whose fields are all optional, all left blank, submits nothing
+     * — Ridgeline's sign-up offers four such fields. There are no field names
+     * to match on, but the customer pressed Continue on the screen they were
+     * shown, and without crediting it the journey re-picks that same screen:
+     * a Continue button that does nothing on the one screen a customer is
+     * entitled to skip.
+     */
+    @Test
+    void anEmptySubmitCreditsTheFormScreenTheCustomerWasOn() {
+        ScreenPlanProperties.Stage optionalForm = new ScreenPlanProperties.Stage(
+                "personal", ScreenKind.FORM, "Gender", "Sign up",
+                "About you", "Tell us about yourself.", "Continue", null,
+                null, null, null, null);
+        DefaultInteractionMapper formMapper = new DefaultInteractionMapper(
+                new ScreenPlanProperties(List.of(optionalForm, BIOMETRICS_STAGE), List.of()));
+
+        assertThat(formMapper.stageFor(List.of(), Set.of())).isEqualTo("personal");
+        // Once credited it is not offered again, so a second empty submit
+        // cannot silently re-complete it.
+        assertThat(formMapper.stageFor(List.of(), Set.of("personal"))).isNull();
+    }
+
+    @Test
+    void anEmptySubmitNeverCreditsACaptureOrConsentScreen() {
+        // Both always submit something — an image or a checkbox set — so an
+        // empty submit did not come from one, and crediting the next capture
+        // stage would skip a screen the customer has not completed.
+        assertThat(mapper.stageFor(List.of(), Set.of())).isNull();
     }
 
     @Test
