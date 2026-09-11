@@ -17,20 +17,23 @@ app:
   cors-allowed-origins:
     - http://localhost:3001
 
-# The gbggo4-demo nonprod tenant. Still inert unless go.mode=live — set that,
-# and the four credentials below, in an untracked .env or via env vars.
+# The public GBG Go platform. Still inert unless go.mode=live — set that, and
+# the two credentials below, in an untracked .env or via env vars.
 #
-# Note the two hosts differ: the Keycloak realm has no region segment, the API
-# host does (-eu). That is not a typo.
+# base-url is regional: swap `eu` for `us` or `au` to match the region your
+# tenant was provisioned in, and set go.region to the same value.
+#
+# Running against a nonprod fabric tenant instead? It uses a Keycloak realm and
+# the password grant, so override auth-url, base-url, grant-type and scope, and
+# supply username and password alongside the client credentials. Put that in a
+# local profile or env vars rather than here — this file ships to customers.
 go:
-  auth-url: https://gbggo4-demo.nonprod.fabric.gbgplatforms.com/auth/realms/go/protocol/openid-connect/token
-  base-url: https://gbggo4-demo-eu.nonprod.fabric.gbgplatforms.com/v2/captain/
-  grant-type: password
-  scope: openid
+  auth-url: https://api.auth.gbgplc.com/as/token.oauth2
+  base-url: https://eu.platform.go.gbgplc.com/v2/captain/
+  grant-type: client_credentials
+  scope: gbg.token
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
-  username: ${GBG_USERNAME:}
-  password: ${GBG_PASSWORD:}
 
 # Live-mode screens for this journey (DefaultInteractionMapper): which
 # domain elements map to which screen, in collection order.
