@@ -10,6 +10,7 @@ import com.gbg.samples.onboarding.api.dto.RecordResponse;
 import com.gbg.samples.onboarding.api.dto.ScreenKind;
 import com.gbg.samples.onboarding.api.dto.StagePlanEntry;
 import com.gbg.samples.onboarding.api.dto.StageState;
+import com.gbg.samples.onboarding.api.dto.SummaryRow;
 import com.gbg.samples.onboarding.config.ScreenPlanProperties;
 import com.gbg.samples.onboarding.go.live.dto.GoInteractionFetchResponse;
 import com.gbg.samples.onboarding.go.live.dto.GoStateResponse;
@@ -214,7 +215,8 @@ public class DefaultInteractionMapper {
             // move — the alternative is guessing, and guessing wrong costs the
             // customer their selfie.
             if (side2Undecided(response.instructions())) {
-                return processingInteraction(interactionId);
+                return processingInteraction(interactionId, "Verifying document type",
+                        "This usually takes a few seconds.");
             }
         }
 
@@ -250,9 +252,13 @@ public class DefaultInteractionMapper {
     }
 
     private Interaction processingInteraction(String interactionId) {
+        return processingInteraction(interactionId, "Running Identity Verification", "This usually takes a few seconds.");
+    }
+
+    private Interaction processingInteraction(String interactionId, String title, String body) {
         return new Interaction(
-                interactionId, ScreenKind.PROCESSING, "Processing", null, "Running your checks",
-                "This usually takes a few seconds.", null, null, null, null, null, null, null, null,
+                interactionId, ScreenKind.PROCESSING, "Processing", null, title,
+                body, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null
         );
     }
@@ -550,10 +556,19 @@ public class DefaultInteractionMapper {
         // mapDecision would default that to REFER ("With our team"), telling the
         // customer a review is under way when nothing is running at all.
         Decision decision = isFailed(response.status()) ? Decision.FAIL : mapDecision(response.result());
+        // The journey graph's own terminal decision node has no name and no
+        // result — every real module has both. Without this filter it falls
+        // back to its raw nodeId (e.g. "mtrehx2922ie24j37zu") and shows up as
+        // a fake module in the list, duplicating the decision the screen
+        // already states up top. Verified against a real completed run,
+        // 2026-09-16.
         List<ModuleRun> moduleRuns = response.allSteps().stream()
+                .filter(step -> step.name() != null)
                 .map(step -> new ModuleRun(
-                        step.name() != null ? step.name() : step.nodeId(),
-                        mapModuleState(step)))
+                        step.name(),
+                        mapModuleState(step),
+                        formatModuleMs(step.durationMilliSec()),
+                        step.result() == null ? null : step.result().outcome()))
                 .toList();
 
         // A module that could not run is not a customer who failed a check.
@@ -581,17 +596,145 @@ public class DefaultInteractionMapper {
                     case REFER -> "Someone is reviewing your details. We will be in touch.";
                 };
 
+        // Journey name, reference, timestamps, total time and the document
+        // type — "route taken" itself is just the order of moduleRuns above,
+        // so it needs no separate row here. Each piece is added only when Go
+        // actually supplied it: a market whose journey predates journeyInfo(),
+        // or one still running when this was fetched, has some or all of it
+        // missing, and a half-true row (e.g. "Total time: NaN seconds") is
+        // worse than no row.
+        //
+        // journey.endedAt is never populated by journey/state/fetch — verified
+        // against two real completed runs, 2026-09-16, both still null after
+        // the decision was reached. The latest step's own endedAt is the
+        // closest real substitute: the decision fires immediately once the
+        // last module finishes.
+        GoStateResponse.Journey journeyInfo = response.journeyInfo();
+        String startedAt = journeyInfo == null ? null : journeyInfo.startedAt();
+        String endedAt = journeyInfo == null || journeyInfo.endedAt() == null
+                ? latestStepEndedAt(response)
+                : journeyInfo.endedAt();
+        String totalTime = formatDurationSeconds(startedAt, endedAt);
+
+        List<SummaryRow> summary = new java.util.ArrayList<>();
+        if (journeyInfo != null && journeyInfo.name() != null && !journeyInfo.name().isBlank()) {
+            String journeyLabel = journeyInfo.version() == null || journeyInfo.version().isBlank()
+                    ? journeyInfo.name()
+                    : journeyInfo.name() + " · v" + journeyInfo.version();
+            summary.add(new SummaryRow("Journey", journeyLabel));
+        }
+        if (response.instanceId() != null && !response.instanceId().isBlank()) {
+            summary.add(new SummaryRow("Reference", response.instanceId()));
+        }
+        String startedLabel = formatTimestamp(startedAt);
+        if (startedLabel != null) {
+            summary.add(new SummaryRow("Started", startedLabel));
+        }
+        String endedLabel = formatTimestamp(endedAt);
+        if (endedLabel != null) {
+            summary.add(new SummaryRow("Decision reached", endedLabel));
+        }
+        if (totalTime != null) {
+            summary.add(new SummaryRow("Total time", totalTime));
+        }
+        String documentLabel = documentTypeLabel(response);
+        if (documentLabel != null) {
+            summary.add(new SummaryRow("Document", documentLabel));
+        }
+
         return new RecordResponse(
                 decision,
                 title,
-                "",
+                totalTime == null ? "" : totalTime,
                 body,
                 systemError ? "Try again" : "Done",
                 moduleRuns,
-                List.of(),
+                List.copyOf(summary),
                 null,
                 systemError
         );
+    }
+
+    private static final java.time.format.DateTimeFormatter TIMESTAMP_FORMAT =
+            java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy HH:mm:ss", Locale.ENGLISH)
+                    .withZone(java.time.ZoneOffset.UTC);
+
+    /** A Go timestamp (ISO-8601) as "26 Aug 2026 09:41:02", or null if missing/unparseable. */
+    private static String formatTimestamp(String iso) {
+        if (iso == null || iso.isBlank()) return null;
+        try {
+            return TIMESTAMP_FORMAT.format(java.time.Instant.parse(iso));
+        } catch (java.time.format.DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    /** The gap between two Go timestamps as "6.4 seconds", or null if either is missing/unparseable. */
+    private static String formatDurationSeconds(String startIso, String endIso) {
+        if (startIso == null || endIso == null) return null;
+        try {
+            java.time.Duration elapsed = java.time.Duration.between(
+                    java.time.Instant.parse(startIso), java.time.Instant.parse(endIso));
+            return String.format(Locale.ROOT, "%.1f seconds", elapsed.toMillis() / 1000.0);
+        } catch (java.time.format.DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    /**
+     * A module's own run time as "1.6s" — shorter than {@link #formatDurationSeconds},
+     * to fit inline next to its pass/fail label rather than as a standalone row.
+     */
+    private static String formatModuleMs(Long durationMilliSec) {
+        if (durationMilliSec == null) return null;
+        return String.format(Locale.ROOT, "%.1fs", durationMilliSec / 1000.0);
+    }
+
+    /**
+     * The most recent module completion time across every step, or null if
+     * none has finished yet — the substitute for {@code journey.endedAt},
+     * which {@code journey/state/fetch} never populates (verified against two
+     * real completed runs, 2026-09-16). ISO-8601 instants in the same
+     * (UTC, 'Z'-suffixed) format compare correctly as plain strings.
+     */
+    private static String latestStepEndedAt(GoStateResponse response) {
+        String latest = null;
+        for (GoStateResponse.Step step : response.allSteps()) {
+            String ended = step.endedAt();
+            if (ended != null && (latest == null || ended.compareTo(latest) > 0)) {
+                latest = ended;
+            }
+        }
+        return latest;
+    }
+
+    /**
+     * The document type Document Classification reported, e.g. "Utopia (UTO)
+     * GBG Sample Identification Card (2024)" — or null if no step has
+     * classified one yet.
+     *
+     * Verified against a real completed run, 2026-09-16: the classified
+     * document is not on the top-level {@code GoResult} at all (its own
+     * {@code data}/{@code advice} field is null throughout a real journey).
+     * It is Document Classification's own step result, echoed back at
+     * {@code result.subject.documents[0].classification.name} — a per-module
+     * contribution to the journey's subject, not a journey-level field. A
+     * later step's result may or may not repeat it, so every step is checked
+     * and the first match wins.
+     */
+    private static String documentTypeLabel(GoStateResponse response) {
+        for (GoStateResponse.Step step : response.allSteps()) {
+            GoStateResponse.StepResult result = step.result();
+            if (result == null || result.subject() == null) continue;
+            if (!(result.subject().get("documents") instanceof List<?> documents) || documents.isEmpty()) continue;
+            if (!(documents.get(0) instanceof Map<?, ?> document)) continue;
+            if (!(document.get("classification") instanceof Map<?, ?> classification)) continue;
+            Object name = classification.get("name");
+            if (name != null && !String.valueOf(name).isBlank()) {
+                return String.valueOf(name);
+            }
+        }
+        return null;
     }
 
     /**
@@ -648,18 +791,41 @@ public class DefaultInteractionMapper {
      * still-running cases and then defers to the classification, the same as
      * the no-result fallback below.
      */
+    /**
+     * Outcome phrases confirmed positive against a real completed run,
+     * 2026-09-16 — deliberately a narrow allowlist, not a keyword match:
+     * "No Match" contains "Match" as a substring, and would wrongly turn
+     * green under anything looser than an exact phrase. Extend only with
+     * phrases actually observed to mean success; an ambiguous one (e.g.
+     * "Medium Risk") stays Review rather than being guessed at.
+     */
+    private static final java.util.Set<String> POSITIVE_OUTCOMES = java.util.Set.of(
+            "document classified", "extraction successful", "success", "match"
+    );
+
     private ModuleState mapModuleState(GoStateResponse.Step step) {
         GoStateResponse.StepResult result = step.result();
         if (result != null && result.status() != null) {
             return switch (result.status().toLowerCase(Locale.ROOT)) {
                 case "error", "timeout" -> ModuleState.FAIL;
                 case "pending" -> ModuleState.RUNNING;
-                // Ran to completion — the verdict is the classification, not the run status.
-                case "complete" -> classify(step.outcomeClassification(), ModuleState.REVIEW);
+                // Ran to completion — the verdict is the classification, not the
+                // run status. Live modules never carry outcomeClassification
+                // themselves (only the journey's own decision node does), so
+                // classify() always falls through to outcomeState() in practice.
+                case "complete" -> classify(step.outcomeClassification(), outcomeState(result.outcome()));
                 default -> ModuleState.REVIEW;
             };
         }
         return classify(step.outcomeClassification(), ModuleState.RUNNING);
+    }
+
+    /** Pass for a confirmed-positive outcome phrase, Review for anything else (including none at all). */
+    private static ModuleState outcomeState(String outcome) {
+        if (outcome != null && POSITIVE_OUTCOMES.contains(outcome.toLowerCase(Locale.ROOT))) {
+            return ModuleState.PASS;
+        }
+        return ModuleState.REVIEW;
     }
 
     /** Positive/negative/other, falling back to {@code whenUnclassified} when Go hasn't reported one yet. */

@@ -3,6 +3,7 @@ package com.gbg.samples.onboarding.go.live.dto;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * POST {baseUrl}journey/state/fetch response — see
@@ -21,7 +22,7 @@ public record GoStateResponse(String instanceId, String status, Journey journey,
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Context(Process process) {
         @JsonIgnoreProperties(ignoreUnknown = true)
-        public record Process(List<Step> steps) {
+        public record Process(List<Step> steps, Journey journey) {
         }
     }
 
@@ -34,17 +35,75 @@ public record GoStateResponse(String instanceId, String status, Journey journey,
         return List.of();
     }
 
+    /**
+     * The journey's own name/version/timing, from wherever this response
+     * carries it. Same nesting split as {@link #allSteps()}: the live
+     * platform puts it at {@code context.process.journey}, not the root.
+     */
+    public Journey journeyInfo() {
+        if (journey != null) return journey;
+        if (context != null && context.process() != null) {
+            return context.process().journey();
+        }
+        return null;
+    }
+
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Journey(String id, String name, String version, String startedAt, String endedAt) {
     }
 
+    /**
+     * {@code durationMilliSec}, {@code startedAt} and {@code endedAt} live at
+     * {@code process.step.*} — verified against a real completed run,
+     * 2026-09-16 — not as siblings of {@code result} as an earlier version of
+     * this class assumed (that guess always read back null).
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record Step(String nodeId, String name, String outcome, String outcomeClassification, StepResult result) {
+    public record Step(String nodeId, String name, String outcome, String outcomeClassification, StepResult result,
+                       StepProcess process) {
+        public Step(String nodeId, String name, String outcome, String outcomeClassification, StepResult result) {
+            this(nodeId, name, outcome, outcomeClassification, result, null);
+        }
+
+        private StepDetail detail() {
+            return process == null ? null : process.step();
+        }
+
+        /** How long this module took to run, in milliseconds, or null if not yet finished. */
+        public Long durationMilliSec() {
+            StepDetail d = detail();
+            return d == null ? null : d.durationMilliSec();
+        }
+
+        /** When this module finished (ISO-8601), or null if not yet finished. */
+        public String endedAt() {
+            StepDetail d = detail();
+            return d == null ? null : d.endedAt();
+        }
     }
 
-    /** A step's own result. Present on the nested `result` object, not the step root. */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record StepResult(String status, String outcome, StepError error) {
+    public record StepProcess(StepDetail step) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepDetail(String startedAt, String endedAt, Long durationMilliSec, String moduleName) {
+    }
+
+    /**
+     * A step's own result. Present on the nested `result` object, not the
+     * step root. {@code subject} is that module's own contribution to the
+     * journey's subject data — e.g. Document Classification's own result
+     * carries {@code subject.documents[0].classification}, which is where the
+     * classified document type actually surfaces (verified against a real
+     * completed run, 2026-09-16) — the top-level {@code GoResult} never
+     * carries it.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record StepResult(String status, String outcome, StepError error, Map<String, Object> subject) {
+        public StepResult(String status, String outcome, StepError error) {
+            this(status, outcome, error, null);
+        }
     }
 
     /**
