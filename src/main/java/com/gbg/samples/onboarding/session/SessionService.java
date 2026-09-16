@@ -81,10 +81,52 @@ public class SessionService {
                 throw OnboardingException.interactionStale("This step has moved on. Refetching the current one.");
             }
 
+            requireCollectedFields(session, data);
+
             SubmitInteractionResponse response = goClient.submitInteraction(session.goInstanceId(), interactionId, data);
             session.recordAdvance(interactionId, data, response);
             return response;
         }
+    }
+
+    /**
+     * Rejects a submission that omits a field the current screen marks required.
+     *
+     * Go accepts such a submission: the journey advances, the domain element is
+     * never populated, and the failure surfaces several screens later as
+     * "Required domain element 'CurrentAddress' data is missing from context" —
+     * naming an element the caller has already moved past, on a step they
+     * cannot return to. A 422 here names the fields instead, while the caller
+     * is still on the screen that collects them.
+     *
+     * The browser clients check this too, so in practice this catches the other
+     * kind of caller: someone writing their own client against this API, who
+     * would otherwise meet that 400 with nothing to act on.
+     *
+     * {@code required} is a nullable Boolean — the mock's fixtures leave it
+     * unset, and a live journey's {@code collects} sets it explicitly. Only an
+     * explicit true blocks, so an unknown requirement is never invented. A
+     * value of whitespace alone is not an answer.
+     */
+    private void requireCollectedFields(Session session, Map<String, Object> data) {
+        Interaction current = goClient.fetchInteraction(session.goInstanceId()).interaction();
+        if (current == null || current.collects() == null) {
+            return;
+        }
+        Map<String, Object> submitted = data == null ? Map.of() : data;
+        Map<String, String> missing = new java.util.LinkedHashMap<>();
+        current.collects().stream()
+                .filter(field -> Boolean.TRUE.equals(field.required()))
+                .filter(field -> isBlank(submitted.get(field.name())))
+                .forEach(field -> missing.put(field.name(), "This is required."));
+
+        if (!missing.isEmpty()) {
+            throw OnboardingException.validationFailed("One or more required fields are missing.", missing);
+        }
+    }
+
+    private static boolean isBlank(Object value) {
+        return value == null || (value instanceof String text && text.isBlank());
     }
 
     public StateResponse getState(String sessionId, String cookieToken) {
