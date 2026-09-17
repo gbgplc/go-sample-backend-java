@@ -125,6 +125,28 @@ public class DefaultInteractionMapper {
             );
         }
 
+        // Referred to a human. Go keeps the journey IN_PROGRESS and names
+        // ManualReviewDecision in `outstanding`: every module has run, the
+        // decision node returned "Manual review", and Go now waits for a
+        // reviewer to act — an out-of-band event that may be minutes or hours
+        // away, and that no amount of polling brings closer.
+        //
+        // Without this the spinner runs to the client's polling cap and then
+        // tells the customer "nothing has been decided about you", which is
+        // untrue: a decision was reached, and it was to refer. Verified on the
+        // live tenant (2026-09-17, instance IP1C5YOS5F0w72elvqa4WM) — 11
+        // modules complete, result.outcome "Decision: Manual review", status
+        // stable at InProgress well past the cap.
+        if (awaitingManualReview(response.outstanding())) {
+            return new Interaction(
+                    interactionId, ScreenKind.RESULT, "Decision", null,
+                    "With our team",
+                    "Someone is reviewing your details. We will be in touch.",
+                    null, "Done", null, null, null, null, null, null, null, null,
+                    Decision.REFER, null, List.of(), null, null
+            );
+        }
+
         if (status == JourneyStatus.IN_PROGRESS) {
             return processingInteraction(interactionId);
         }
@@ -517,6 +539,19 @@ public class DefaultInteractionMapper {
      * it as a request for side 2 would show the back-of-document screen before
      * the front had been taken.
      */
+    /**
+     * Whether the journey is parked awaiting a human reviewer.
+     *
+     * Go signals this by naming {@code ManualReviewDecision} in
+     * {@code outstanding} while the journey status stays IN_PROGRESS. It is not
+     * a collectable element — no screen can satisfy it, and the customer is not
+     * being asked for anything.
+     */
+    private static boolean awaitingManualReview(List<String> outstanding) {
+        return outstanding != null
+                && outstanding.stream().anyMatch("ManualReviewDecision"::equalsIgnoreCase);
+    }
+
     private static boolean side2Required(List<String> outstanding, List<String> instructions) {
         if (outstanding != null && outstanding.contains("PrimaryDocument/side2Image")) {
             return true;
