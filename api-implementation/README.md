@@ -1,4 +1,8 @@
-# Onboarding service (Java)
+# Onboarding service (Java) — API implementation
+
+One of two implementations in this repo: this one integrates with GBG Go v2
+via hand-rolled HTTP. See `../sdk-implementation/` for the sibling built on
+GBG's Java Core SDK, and the root `README.md` for how the two relate.
 
 The thin-proxy backend from *Market onboarding applications — front-end
 handoff*, section 1: holds the GBG Go client credentials, mints and refreshes
