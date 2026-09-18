@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.gbg.samples</groupId>
+  <artifactId>sdk-jar-inspection</artifactId>
+  <version>0.0.0</version>
+  <packaging>pom</packaging>
+  <description>
+    Throwaway project with a single dependency, used only to pull
+    com.gbg:go-core-sdk and its transitive dependencies into a local folder for
+    inspection (dependency:tree, dependency:copy-dependencies) ahead of writing
+    sdk-implementation. Not part of the buildable product — see
+    spike/sdk-jar-inspection/FINDINGS.md for the actual conclusions.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.gbg</groupId>
+      <artifactId>go-core-sdk</artifactId>
+      <version>0.1.0-alpha01</version>
+    </dependency>
+  </dependencies>
+</project>
