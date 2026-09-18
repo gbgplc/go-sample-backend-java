@@ -178,41 +178,46 @@ three new suites replacing api-implementation's `DecidedStateTest` and
 
 ## Known gaps in this SDK integration
 
-Everything below is either explicitly flagged as unverified in
+Everything below was either flagged as unverified in
 `../spike/sdk-jar-inspection/FINDINGS.md`, or something discovered while
-writing `go/sdk/**` that goes beyond what the spike checked. None of it could
-be resolved further without live credentials against a real Go tenant —
-that verification is explicitly out of scope for this branch (see the
-project plan's Phase 7) and is the first thing to do with this module before
-trusting it in anger.
+writing `go/sdk/**` that goes beyond what the spike checked. Items (a) and (b)
+have since been verified/fixed live (2026-09-18, Meridian Health, public
+platform) — kept here with their resolution rather than deleted, since the
+"what was uncertain and how it was actually resolved" is worth keeping.
 
-**(a) `interactionAccess` is assumed equal to `customerAccess`.**
-`interactions().fetch()`/`.submit()` require a separate `SubmitInteraction
-Security`/`FetchInteractionSecurity`, each wrapping an `interactionAccess`
-bearer string distinct from the `customerAccess` used by
-`journeys().start()`/`.getState()`. No operation anywhere in the SDK's
-surface (`tokens`, `health`, `devices`, `tasks`, `journeys`, `instances`,
-`interactions`) issues a second, scoped credential. `GoSdkClient` passes the
-same cached token to both. **If wrong, the very first live `submit()` or
-`fetch()` call 401s** — a fast, cheap way to falsify this. See FINDINGS.md, Q8.
+**(a) `interactionAccess` equals `customerAccess` — CONFIRMED.** A full live
+journey (personal details → contact → address → document capture → selfie
+capture → decision) ran end to end through `interactions().submit()`/`.fetch()`
+using the same cached token passed to both security schemes. No 401 at any
+step. The two named security schemes resolve to the same bearer credential on
+the real API, as FINDINGS.md Q8 guessed.
 
-**(b) Step/module timing and the journey decision live in the untyped `data`
-map, not the typed `context` — confirmed as far as static reading can go, not
-proven live.** `GetJourneyStateResponseBody`'s typed `context` field wraps
-*only* `subject` (the extracted identity/document/biometric domain model,
-confirmed by reading `GetJourneyStateContext`'s real source — it has exactly
-one field). There is no typed field anywhere in the generated model for
-per-module `durationMilliSec`/`endedAt`, per-module `outcome`/
-`outcomeClassification`, or the journey-level decision. `SdkInteractionMapper
-.toRecord()` therefore reads all of that from the untyped `data` catch-all,
-walking the same JSON paths (`steps` / `context.process.steps`, root-level
-`result`, `context.process.journey`) the old raw-HTTP `GoStateResponse`
-record used to deserialize automatically. This is very likely correct — `data`
-being untyped is exactly where "the rest of the JSON that didn't get a typed
-model" would land — but it is **not confirmed against a live populated
-response**. `SdkDecidedStateTest`/`SdkInteractionMapperTest`'s `toRecord`
-fixtures encode this same assumption; they prove the mapper's own logic is
-internally consistent, not that Go's real response is shaped this way.
+**(b) Step/module timing and the journey decision are NOT in `data` at all —
+CONFIRMED AND FIXED.** A live capture of ten consecutive `journeys().getState()`
+polls against a genuine in-progress instance came back `data={}` every single
+time, while `context` was populated. Root cause: `com.gbg.gocore.utils.JSON`'s
+shared `ObjectMapper` sets `FAIL_ON_UNKNOWN_PROPERTIES = false`, and
+`GetJourneyStateResponseBody` has no field for the wire JSON's top-level
+`steps`/`result` keys — Jackson silently drops them rather than routing them
+into `data` or erroring. This is a genuine gap in the SDK's current (alpha)
+response model for this one operation, not a wrong guess about where to look.
+
+Fix: `RawStateBodyCapturingHttpClient` wraps the SDK's own
+`SpeakeasyHTTPClient` and, only for a `journey/state/fetch` request, buffers
+the exact response bytes as they come off the wire — no extra network call —
+before handing back an equally-readable response for the SDK's normal typed
+parsing to continue as usual. `GoSdkClient.fetchGoState` then parses that same
+buffer itself with `JSON.getMapper()` and passes the result into
+`SdkInteractionMapper.toRecord`/`.carriesRealResult` as an explicit
+`rawStateBody` parameter, falling back to `body.data()` (confirmed always
+empty, but free to try) only if the buffer capture itself somehow comes back
+empty. Verified live: `moduleRuns`, per-module timing, and the full journey
+summary (name, reference, started/decided timestamps, total time) all
+populate correctly now — previously every field derived from `data` was
+silently absent, and every decision defaulted to "Referred" regardless of the
+real outcome, since `mapDecision` (itself an exact, previously-proven-correct
+port from `api-implementation`) was defaulting on a `null` classification it
+should never have seen.
 
 **(c) Document classification: typed path added, still falls back to the raw
 map.** Unlike (b), there **is** a typed alternative for document

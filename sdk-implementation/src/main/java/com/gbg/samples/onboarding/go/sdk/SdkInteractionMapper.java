@@ -76,17 +76,30 @@ import java.util.Set;
  *       the generated model for per-module timing
  *       ({@code durationMilliSec}/{@code endedAt}), per-module
  *       outcome/outcomeClassification, or the journey-level decision
- *       classification. Confirmed by reading {@code GetJourneyStateContext}'s
- *       real source: it has exactly one field, {@code subject}. So all of
- *       that — everything {@link #toRecord} needs beyond {@code status} —
- *       is read out of the untyped {@code data} catch-all map, walking the
- *       same JSON paths ({@code steps} / {@code context.process.steps},
- *       root-level {@code result}, {@code context.process.journey}) the old
- *       raw-HTTP {@code GoStateResponse} record used to deserialize
- *       automatically. <b>This is unverified against a live populated
- *       response</b> (no credentials available while porting) — FINDINGS.md
- *       flags the same gap under Q3. If a live run shows this data living
- *       somewhere else in the map, this is the method to fix.</li>
+ *       classification. This was flagged in FINDINGS.md Q3 as unverified, and
+ *       verified live 2026-09-18: the SDK's shared {@code ObjectMapper}
+ *       ({@code com.gbg.gocore.utils.JSON}) is configured with
+ *       {@code FAIL_ON_UNKNOWN_PROPERTIES = false}, so the wire JSON's
+ *       top-level {@code steps} and {@code result} keys — which the old
+ *       raw-HTTP {@code GoStateResponse} record declared and read directly —
+ *       have no field to land in on this generated class and are silently
+ *       discarded. They never reach {@code data} either: a live capture of
+ *       every {@code journey/state/fetch} response for a real instance came
+ *       back {@code data={}} every time, {@code context} populated. This is
+ *       a genuine gap in the SDK's current (alpha) response model for this
+ *       operation, not a wrong guess about where to look.
+ *
+ *       <p>The fix ({@link GoSdkClient}, via {@link RawStateBodyCapturingHttpClient})
+ *       buffers the exact wire bytes of the {@code journey/state/fetch}
+ *       response as the SDK's own {@link com.gbg.gocore.utils.SpeakeasyHTTPClient}
+ *       sends them — no separate network call — and parses that buffer
+ *       itself with a plain {@code ObjectMapper}, the same way
+ *       {@code GoStateResponse} used to. {@link #toRecord} and
+ *       {@link #carriesRealResult} both now take that raw parsed map as an
+ *       explicit parameter (named {@code rawStateBody}) instead of reading
+ *       {@code body.data()}, which is confirmed to always be empty for this
+ *       operation and kept only as the last-resort fallback it always
+ *       was.</li>
  *   <li>Document classification has a genuine typed alternative
  *       ({@code context.subject.documents[0].classification}) with
  *       {@code category}/{@code type}/{@code subtype}/{@code countryName}/
@@ -527,9 +540,20 @@ public class SdkInteractionMapper {
     // journeys().getState() -> RecordResponse
     // ------------------------------------------------------------------
 
-    public RecordResponse toRecord(GetJourneyStateResponseBody body) {
+    /**
+     * @param rawStateBody the same {@code journey/state/fetch} response,
+     *                      parsed independently from the raw wire bytes
+     *                      ({@link RawStateBodyCapturingHttpClient}) — see
+     *                      this class's javadoc for why {@code body.data()}
+     *                      alone is not enough. Never null; pass {@code Map.of()}
+     *                      if the raw bytes genuinely could not be captured.
+     */
+    public RecordResponse toRecord(GetJourneyStateResponseBody body, Map<String, Object> rawStateBody) {
         String goStatus = body.status().value();
-        Map<String, Object> data = body.data().orElse(Map.of());
+        // body.data() is confirmed always empty for this operation (see class
+        // javadoc) but costs nothing to prefer if the SDK ever starts
+        // populating it — rawStateBody is the confirmed-working source.
+        Map<String, Object> data = !rawStateBody.isEmpty() ? rawStateBody : body.data().orElse(Map.of());
 
         Decision decision = isFailed(goStatus) ? Decision.FAIL : mapDecision(rawResult(data));
         List<RawStep> steps = rawSteps(data);
@@ -615,8 +639,8 @@ public class SdkInteractionMapper {
      * computed {@code RecordResponse} rather than re-deriving moduleRuns
      * itself.
      */
-    public boolean carriesRealResult(GetJourneyStateResponseBody body) {
-        Map<String, Object> data = body.data().orElse(Map.of());
+    public boolean carriesRealResult(GetJourneyStateResponseBody body, Map<String, Object> rawStateBody) {
+        Map<String, Object> data = !rawStateBody.isEmpty() ? rawStateBody : body.data().orElse(Map.of());
         RawResult result = rawResult(data);
         return result != null && result.outcomeClassification() != null;
     }

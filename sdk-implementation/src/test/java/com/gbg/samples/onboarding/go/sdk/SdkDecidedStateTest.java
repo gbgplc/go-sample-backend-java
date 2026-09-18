@@ -70,7 +70,7 @@ class SdkDecidedStateTest {
         GetJourneyStateResponseBody state = stateWith("Decision: Manual review", "neutral",
                 List.of(doneStep("Facematch Verification"), evaluationStep("neutral")));
 
-        RecordResponse record = mapper.toRecord(state);
+        RecordResponse record = mapper.toRecord(state, Map.of());
 
         assertThat(record.moduleRuns())
                 .extracting(r -> r.state())
@@ -84,7 +84,7 @@ class SdkDecidedStateTest {
         GetJourneyStateResponseBody state = stateWith("Decision: Accept", "positive",
                 List.of(doneStep("Facematch Verification"), evaluationStep("positive")));
 
-        RecordResponse record = mapper.toRecord(state);
+        RecordResponse record = mapper.toRecord(state, Map.of());
 
         assertThat(record.decision()).isEqualTo(Decision.PASS);
         assertThat(record.title()).isEqualTo("Verification complete");

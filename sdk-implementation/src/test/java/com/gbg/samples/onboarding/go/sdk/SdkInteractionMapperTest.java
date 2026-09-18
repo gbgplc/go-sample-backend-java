@@ -401,7 +401,7 @@ class SdkInteractionMapperTest {
         decisionNode.put("outcome", "Decision: Accept");
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(realModule, decisionNode), null, resultMap(null, "positive")));
+                buildState("Completed", List.of(realModule, decisionNode), null, resultMap(null, "positive")), Map.of());
 
         assertThat(record.moduleRuns()).extracting("label").containsExactly("Document Authentication");
     }
@@ -410,7 +410,7 @@ class SdkInteractionMapperTest {
     void theModuleRunCarriesGosOwnDescriptiveOutcome() {
         Map<String, Object> step = stepMap("Document Classification", null, "complete", "Document Classified");
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step));
+        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
 
         assertThat(record.moduleRuns().get(0).outcome()).isEqualTo("Document Classified");
     }
@@ -419,7 +419,7 @@ class SdkInteractionMapperTest {
     void aConfirmedPositiveOutcomePhraseIsReportedAsPassEvenWithNoOutcomeClassification() {
         Map<String, Object> step = stepMap("Document Extraction", null, "complete", "Extraction Successful");
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step));
+        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
@@ -430,7 +430,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> mediumRisk = stepMap("Document Authentication", null, "complete", "Medium Risk");
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(noMatch, mediumRisk), null, resultMap(null, "positive")));
+                buildState("Completed", List.of(noMatch, mediumRisk), null, resultMap(null, "positive")), Map.of());
 
         assertThat(record.moduleRuns()).extracting("state")
                 .containsExactly(ModuleState.REVIEW, ModuleState.REVIEW);
@@ -440,7 +440,7 @@ class SdkInteractionMapperTest {
     void aModuleThatRanToCompletionButDeclinedIsReportedAsFailNotPass() {
         Map<String, Object> declined = stepMap("Document Authentication", "negative", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(declined));
+        RecordResponse record = mapper.toRecord(stateResponseWith(declined), Map.of());
 
         assertThat(record.moduleRuns()).hasSize(1);
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.FAIL);
@@ -450,7 +450,7 @@ class SdkInteractionMapperTest {
     void aModuleThatRanToCompletionAndPassedIsReportedAsPass() {
         Map<String, Object> passed = stepMap("Document Authentication", "positive", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(passed));
+        RecordResponse record = mapper.toRecord(stateResponseWith(passed), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
@@ -459,7 +459,7 @@ class SdkInteractionMapperTest {
     void aStillRunningModuleIsReportedAsRunningRegardlessOfAnyClassification() {
         Map<String, Object> running = stepMap("Facematch Verification", "negative", "pending", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(running));
+        RecordResponse record = mapper.toRecord(stateResponseWith(running), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.RUNNING);
     }
@@ -468,7 +468,7 @@ class SdkInteractionMapperTest {
     void aModuleThatErroredIsReportedAsFail() {
         Map<String, Object> errored = stepMap("Document Classification", null, "error", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(errored));
+        RecordResponse record = mapper.toRecord(stateResponseWith(errored), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.FAIL);
     }
@@ -477,7 +477,7 @@ class SdkInteractionMapperTest {
     void aModuleWithNoResultYetFallsBackToItsOwnClassification() {
         Map<String, Object> notYetRun = stepMap("Liveness Verification", null, null, null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun));
+        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.RUNNING);
     }
@@ -491,7 +491,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> journey = journeyMap("UK retail account opening", "12", "2026-08-26T09:41:02Z", null);
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(step), journey, resultMap(null, "positive")));
+                buildState("Completed", List.of(step), journey, resultMap(null, "positive")), Map.of());
 
         assertThat(record.moduleRuns().get(0).ms()).isEqualTo("1.6s");
         assertThat(record.timing()).isEqualTo("6.0 seconds");
@@ -522,7 +522,7 @@ class SdkInteractionMapperTest {
                 .data(data)
                 .build();
 
-        RecordResponse record = mapper.toRecord(body);
+        RecordResponse record = mapper.toRecord(body, Map.of());
 
         assertThat(record.summary()).contains(new SummaryRow("Journey", "Patient record access"));
     }
@@ -536,7 +536,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> journey = journeyMap("Patient record access", null, "2026-08-26T09:41:00Z", null);
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(earlier, later), journey, resultMap(null, "positive")));
+                buildState("Completed", List.of(earlier, later), journey, resultMap(null, "positive")), Map.of());
 
         assertThat(record.summary()).contains(
                 new SummaryRow("Decision reached", "26 Aug 2026 09:41:44"),
@@ -547,7 +547,7 @@ class SdkInteractionMapperTest {
     void theRecordHasNoTimingRowsWhenGoSuppliesNoJourneyTiming() {
         Map<String, Object> step = stepMap("Liveness Verification", "positive", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step));
+        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
 
         assertThat(record.summary()).containsExactly(new SummaryRow("Reference", "instance-1"));
         assertThat(record.timing()).isEmpty();
@@ -572,7 +572,7 @@ class SdkInteractionMapperTest {
         step.put("result", result);
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(step), null, resultMap(null, "positive")));
+                buildState("Completed", List.of(step), null, resultMap(null, "positive")), Map.of());
 
         assertThat(record.summary())
                 .contains(new SummaryRow("Document", "Utopia (UTO) GBG Sample Identification Card (2024)"));
@@ -582,7 +582,7 @@ class SdkInteractionMapperTest {
     void thereIsNoDocumentRowWhenGoNeverReportsAType() {
         Map<String, Object> step = stepMap("Liveness Verification", "positive", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step));
+        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
 
         assertThat(record.summary()).noneMatch(row -> row.k().equals("Document"));
     }

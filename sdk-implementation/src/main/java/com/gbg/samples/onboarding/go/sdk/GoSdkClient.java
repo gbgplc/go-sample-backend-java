@@ -2,6 +2,7 @@ package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.Go;
 import com.gbg.gocore.models.errors.APIException;
+import com.gbg.gocore.utils.JSON;
 import com.gbg.gocore.models.operations.FetchInteractionError;
 import com.gbg.gocore.models.operations.FetchInteractionRequest;
 import com.gbg.gocore.models.operations.FetchInteractionResponse;
@@ -101,6 +102,17 @@ public class GoSdkClient implements GoClient {
     private volatile Go goClient;
     private volatile String goClientToken;
 
+    /**
+     * Shared across every {@code Go} instance this client builds (see
+     * {@link #currentGoClient}) — it holds no per-token state, only the
+     * thread-local buffer {@link #fetchGoState} reads right after each
+     * {@code journey/state/fetch} call. See {@link RawStateBodyCapturingHttpClient}'s
+     * javadoc and {@link SdkInteractionMapper}'s for why this exists: the
+     * SDK's typed response for that one operation silently drops the
+     * journey decision and per-module results.
+     */
+    private final RawStateBodyCapturingHttpClient rawStateHttpClient = new RawStateBodyCapturingHttpClient();
+
     public GoSdkClient(GoSdkProperties properties, GoSdkAuthService authService,
                         SdkInteractionMapper mapper, AppConfigProperties appConfig) {
         this.properties = properties;
@@ -111,7 +123,7 @@ public class GoSdkClient implements GoClient {
 
     private synchronized Go currentGoClient(String token) {
         if (goClient == null || !token.equals(goClientToken)) {
-            Go.Builder builder = Go.builder().customerAccess(token);
+            Go.Builder builder = Go.builder().customerAccess(token).client(rawStateHttpClient);
             // usesDocumentedRegion(): region is one of eu/us/au and no explicit
             // base-url override is configured, so serverIndex(0/1/2) — confirmed
             // to map exactly onto the documented hosts, FINDINGS.md Q7 — is
@@ -239,15 +251,15 @@ public class GoSdkClient implements GoClient {
 
     @Override
     public StateResponse fetchState(String instanceId) {
-        GetJourneyStateResponseBody body = fetchGoState(instanceId);
-        RecordResponse asRecord = mapper.toRecord(body);
-        String goStatus = body.status().value();
+        GoState state = fetchGoState(instanceId);
+        RecordResponse asRecord = mapper.toRecord(state.body(), state.rawStateBody());
+        String goStatus = state.body().status().value();
 
         // Same three-way terminal check as GoApiClient.fetchState — see its
         // javadoc for the full rationale (Completed / Failed-or-Error / a
         // decision reached with every module settled, because the Northbank
         // journey settles on `refer` without ever reaching status Completed).
-        boolean carriesRealResult = mapper.carriesRealResult(body);
+        boolean carriesRealResult = mapper.carriesRealResult(state.body(), state.rawStateBody());
         boolean everyModuleSettled = !asRecord.moduleRuns().isEmpty()
                 && asRecord.moduleRuns().stream().noneMatch(run -> ModuleState.RUNNING.equals(run.state()));
         boolean decided = carriesRealResult && everyModuleSettled;
@@ -262,10 +274,24 @@ public class GoSdkClient implements GoClient {
 
     @Override
     public RecordResponse fetchRecord(String instanceId) {
-        return mapper.toRecord(fetchGoState(instanceId));
+        GoState state = fetchGoState(instanceId);
+        return mapper.toRecord(state.body(), state.rawStateBody());
     }
 
-    private GetJourneyStateResponseBody fetchGoState(String instanceId) {
+    /**
+     * @param rawStateBody the same response's wire bytes, parsed independently
+     *                      of the SDK's typed model — see
+     *                      {@link RawStateBodyCapturingHttpClient} and
+     *                      {@link SdkInteractionMapper}'s javadoc for why.
+     *                      Never null; empty if the raw bytes could not be
+     *                      captured or parsed, in which case callers fall
+     *                      back to {@code body.data()} (itself always empty
+     *                      in practice, but cheap to try).
+     */
+    private record GoState(GetJourneyStateResponseBody body, Map<String, Object> rawStateBody) {
+    }
+
+    private GoState fetchGoState(String instanceId) {
         String token = authService.accessToken();
         Go go = currentGoClient(token);
         GetJourneyStateResponse response = call(() -> go.journeys().getState(new GetJourneyStateRequest(instanceId)));
@@ -273,7 +299,20 @@ public class GoSdkClient implements GoClient {
         if (body == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
         }
-        return body;
+        Map<String, Object> rawStateBody = rawStateHttpClient.takeLastStateFetchBody()
+                .map(this::parseRawStateBody)
+                .orElse(Map.of());
+        return new GoState(body, rawStateBody);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseRawStateBody(byte[] bytes) {
+        try {
+            return JSON.getMapper().readValue(bytes, Map.class);
+        } catch (Exception e) {
+            log.warn("Could not parse the raw journey/state/fetch body; falling back to the SDK's own (empty) data map", e);
+            return Map.of();
+        }
     }
 
     /**
