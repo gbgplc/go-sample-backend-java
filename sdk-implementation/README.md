@@ -54,7 +54,7 @@ The user wanted the hand-rolled HTTP integration and the official SDK
 integration comparable side by side rather than one replacing the other. The
 SDK is alpha (`0.1.0-alpha01`) and its public docs name methods and types
 without documenting their field shapes — see
-`../spike/sdk-jar-inspection/FINDINGS.md` for how those shapes were actually
+`docs/sdk-jar-inspection/FINDINGS.md` for how those shapes were actually
 confirmed (by pulling the SDK's own `-sources.jar` from Maven Central and
 reading the real generated code, not guessing), before any of the classes in
 `go/sdk/` were written.
@@ -179,7 +179,7 @@ three new suites replacing api-implementation's `DecidedStateTest` and
 ## Known gaps in this SDK integration
 
 Everything below was either flagged as unverified in
-`../spike/sdk-jar-inspection/FINDINGS.md`, or something discovered while
+`docs/sdk-jar-inspection/FINDINGS.md`, or something discovered while
 writing `go/sdk/**` that goes beyond what the spike checked. Items (a) and (b)
 have since been verified/fixed live (2026-09-18, Meridian Health, public
 platform) — kept here with their resolution rather than deleted, since the

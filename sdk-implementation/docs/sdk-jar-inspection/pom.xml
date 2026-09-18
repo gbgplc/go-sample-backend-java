@@ -13,7 +13,7 @@
     com.gbg:go-core-sdk and its transitive dependencies into a local folder for
     inspection (dependency:tree, dependency:copy-dependencies) ahead of writing
     sdk-implementation. Not part of the buildable product — see
-    spike/sdk-jar-inspection/FINDINGS.md for the actual conclusions.
+    sdk-implementation/docs/sdk-jar-inspection/FINDINGS.md for the actual conclusions.
   </description>
 
   <dependencies>

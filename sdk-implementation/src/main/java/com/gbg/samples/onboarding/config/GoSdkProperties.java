@@ -30,7 +30,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *       region-prefixed API host ({@code eu.platform.go.gbgplc.com}) that maps
  *       exactly onto {@code Go.builder().serverIndex(0/1/2)} for eu/us/au
  *       (confirmed against the SDK's own {@code Go.SERVERS} array — see
- *       {@code spike/sdk-jar-inspection/FINDINGS.md}, Q7).</li>
+ *       {@code docs/sdk-jar-inspection/FINDINGS.md}, Q7).</li>
  *   <li><b>Fabric nonprod</b> — a Keycloak realm, the {@code password} grant
  *       (client id and secret <em>plus</em> username and password), and an API
  *       host whose region is part of the tenant name. Its token host carries no

@@ -17,9 +17,9 @@ oracleJdk-26.jdk/
 .env.*
 !.env.example
 
-# spike/sdk-jar-inspection: downloaded/decompiled SDK jars — large, derived,
-# and not worth committing. pom.xml and FINDINGS.md (the actual conclusions)
-# are tracked.
-spike/**/libs/
-spike/**/extracted/
-spike/**/decompiled/
+# sdk-implementation/docs/sdk-jar-inspection: downloaded/decompiled SDK jars —
+# large, derived, and not worth committing. pom.xml and FINDINGS.md (the
+# actual conclusions) are tracked.
+sdk-implementation/docs/**/libs/
+sdk-implementation/docs/**/extracted/
+sdk-implementation/docs/**/decompiled/

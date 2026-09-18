@@ -32,7 +32,7 @@ import java.time.Instant;
  * implementing {@link PostAsTokenOauth2Request}) with a response shape
  * ({@link PostAsTokenOauth2ResponseBody}: {@code accessToken}/{@code expiresIn}/
  * {@code tokenType}) that matches the old {@code GoTokenResponse} exactly (see
- * {@code spike/sdk-jar-inspection/FINDINGS.md}, Q6). The caching wrapper
+ * {@code docs/sdk-jar-inspection/FINDINGS.md}, Q6). The caching wrapper
  * itself — {@code cachedToken}/{@code cachedTokenExpiresAt}/
  * {@code REFRESH_MARGIN_SECONDS}, synchronized mint-on-demand — is ported
  * near-verbatim, because nothing in the SDK auto-refreshes a token for you.

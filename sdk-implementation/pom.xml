@@ -53,7 +53,7 @@
 
     <!-- The official GBG Go Core SDK — replaces api-implementation's hand-rolled
          go/live/** RestClient calls. Alpha release; see sdk-implementation/README.md
-         and spike/sdk-jar-inspection/FINDINGS.md for what was verified against its
+         and docs/sdk-jar-inspection/FINDINGS.md for what was verified against its
          real generated source before writing go/sdk/**. -->
     <dependency>
       <groupId>com.gbg</groupId>

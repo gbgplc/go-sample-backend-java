@@ -18,7 +18,7 @@ import static org.mockito.Mockito.mock;
  * SDK's real exception type. The spike confirmed every generated operation
  * throws {@link APIException} (extending the abstract {@code GoException})
  * on 4XX/5XX, settling what the docs left ambiguous between {@code GoException}
- * and {@code APIException} (see {@code spike/sdk-jar-inspection/FINDINGS.md},
+ * and {@code APIException} (see {@code docs/sdk-jar-inspection/FINDINGS.md},
  * Q1) — this test locks in {@link GoSdkClient#call} classifying that
  * exception's {@code code()} the same way {@code GoApiClient.call()}
  * classified an HTTP status code.

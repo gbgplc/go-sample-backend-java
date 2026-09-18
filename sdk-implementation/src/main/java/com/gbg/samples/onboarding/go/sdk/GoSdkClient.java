@@ -52,7 +52,7 @@ import java.util.function.Supplier;
  *
  * Structurally complete and exercised against the shapes confirmed by
  * reading the SDK's real generated source (see
- * {@code spike/sdk-jar-inspection/FINDINGS.md}), but — like
+ * {@code docs/sdk-jar-inspection/FINDINGS.md}), but — like
  * api-implementation's own client before it — not run against a live tenant
  * while building this sample; there is no credential set available in this
  * environment to test against. Treat first use against a real environment as

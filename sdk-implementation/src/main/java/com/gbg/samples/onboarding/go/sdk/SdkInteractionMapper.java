@@ -60,7 +60,7 @@ import java.util.Set;
  * ported structurally unchanged; only the Go-response-shaped inputs differ.
  *
  * <h2>What actually changed shape, per the spike (see
- * {@code spike/sdk-jar-inspection/FINDINGS.md})</h2>
+ * {@code docs/sdk-jar-inspection/FINDINGS.md})</h2>
  * <ul>
  *   <li>{@code collects} is now a typed {@code List<CollectUnion>}
  *       (wrapping {@code Collect1}/{@code Collect2}: {@code ref}/{@code spec}/
