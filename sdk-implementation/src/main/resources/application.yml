@@ -1,0 +1,28 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: onboarding-service
+  jackson:
+    default-property-inclusion: non_null
+
+app:
+  market: northbank
+  cors-allowed-origins:
+    - http://localhost:3000
+
+go:
+  mode: mock
+  region: eu
+  # Only read when go.mode=live — never commit real values, set via env vars.
+  client-id: ${GBG_CLIENT_ID:}
+  client-secret: ${GBG_CLIENT_SECRET:}
+
+session:
+  ttl-minutes: 30
+  cookie-name: onboarding_session
+
+logging:
+  level:
+    com.gbg.samples.onboarding: INFO
