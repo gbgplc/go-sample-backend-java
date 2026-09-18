@@ -1,0 +1,146 @@
+﻿server:
+  port: 8092
+
+app:
+  market: meridian-health
+  brand: Meridian Health
+  mark: M
+  tagline: Patient record registration
+  accent: "#219C4C"
+  accent-soft: "#C7EBD5"
+  help-line: "Reception can verify you in person with the same documents."
+  journey-name: Patient record access
+  # Published to Preview on the gbggo4-demo tenant, 2026-09-07. Pinned to an
+  # exact version rather than @latest: @latest costs a Journey-builder lookup
+  # on every start and doesn't pick up a publish predictably.
+  resource-id: b3d149562ec927dedcd76f3a6b7b0f82bbf7de818aebad3b3f7baa4c14940b6b@5ph3fkm5
+  cors-allowed-origins:
+    - http://localhost:3001
+
+# The public GBG Go platform. Still inert unless go.mode=live â€” set that, and
+# the two credentials below, in an untracked .env or via env vars.
+#
+# base-url is regional: swap `eu` for `us` or `au` to match the region your
+# tenant was provisioned in, and set go.region to the same value.
+#
+# Running against a nonprod fabric tenant instead? It uses a Keycloak realm and
+# the password grant, so override auth-url, base-url, grant-type and scope, and
+# supply username and password alongside the client credentials. Put that in a
+# local profile or env vars rather than here â€” this file ships to customers.
+go:
+  auth-url: https://api.auth.gbgplc.com/as/token.oauth2
+  base-url: https://eu.platform.go.gbgplc.com/v2/captain/
+  grant-type: client_credentials
+  scope: gbg.token
+  client-id: ${GBG_CLIENT_ID:}
+  client-secret: ${GBG_CLIENT_SECRET:}
+
+# Live-mode screens for this journey (DefaultInteractionMapper): which
+# domain elements map to which screen, in collection order.
+#
+# Written against the journey published on gbggo4-demo
+# (resource b3d1495â€¦@5ph3fkm5) from what a live fetch returns â€” verified
+# 2026-09-10. Stages match against the interaction's `collects` list, which
+# names 47 refs across seven pages; `outstanding` is the narrower field and
+# omits any element whose parent is optional, so matching on that alone
+# drops pages the journey really has.
+#
+# Order follows the journey's own pages: consent first â€” a patient consents
+# to their record being opened before anything is collected â€” then identity
+# and contact details, the address, and document before selfie, because
+# Facematch compares the selfie against the anchor image Document
+# Classification produces. Go enforces the module dependency, not the
+# collection order, but collecting in module order keeps the progress rail
+# honest.
+#
+# Copy matches apps/meridian-health/onboarding.config.ts so the live journey
+# reads identically to the mock.
+screen-plan:
+  stages:
+    - name: consent
+      kind: consent
+      prefix: Consent/
+      stage: Consent
+      title: Share your record with Meridian Health
+      body: You decide what each group can see. You can change any of this later in settings.
+      cta: Agree and continue
+      modules:
+        - Consent Collection
+    # also-prefixes: one screen, several domain elements. Each is a separate
+    # top-level element in `collects`, so a single prefix would claim only the
+    # first and the screen would render one field out of three.
+    - name: personal
+      kind: form
+      prefix: MothersMaidenName
+      also-prefixes:
+        - Gender
+        - NationalInsuranceNumber
+      stage: Details
+      title: Your details
+      body: We match these against national records to find your patient file.
+      cta: Continue
+    - name: contact
+      kind: form
+      prefix: MobilePhone/
+      also-prefixes:
+        - LandlinePhone/
+      stage: Contact
+      title: How can we reach you?
+      body: We use this to confirm it is you, and to tell you when your record is ready.
+      cta: Continue
+    # Fields, types and helper text come from the journey's own `collects`
+    # (DefaultInteractionMapper.fieldsFor), filtered to the required ones â€”
+    # CurrentAddress alone lists 18 fields, of which 5 are required.
+    - name: address
+      kind: form
+      prefix: CurrentAddress/
+      stage: Address
+      title: Your address
+      body: We match this against national records to find your patient file.
+      cta: Continue
+    - name: document
+      kind: capture
+      prefix: PrimaryDocument/
+      stage: Document
+      title: Scan your photo ID
+      body: We check the document is genuine and read the details from it.
+      cta: Scan document
+      capture-type: document
+      accepted:
+        - Passport
+        - Driving licence
+        - Biometric residence permit
+      modules:
+        - Document Classification
+        - Document Extraction
+        - Document Authentication
+    - name: biometrics
+      kind: capture
+      prefix: Selfie/
+      stage: Biometrics
+      title: Take a selfie
+      body: This proves you are the person in the document, so nobody else can open your record.
+      cta: Take selfie
+      capture-type: selfie
+      modules:
+        - Liveness Verification
+        - Facematch Verification
+  # The design has three independent toggles; the Consent Collection module
+  # records acceptance of one agreement (its only required element is
+  # Consent/url). Only the first gates access â€” a patient who will not share
+  # with clinicians cannot be given a record â€” so that one drives the
+  # module, and the other two are recorded as preferences alongside it
+  # rather than as separate consent records.
+  consent-checks:
+    - name: shareWithClinicians
+      label: Show my record to clinicians treating me
+      detail: GP notes, test results, prescriptions and referrals
+      default-checked: true
+    - name: sharePrescriptions
+      label: Share prescriptions with my chosen pharmacy
+      detail: Only the pharmacy you name
+      default-checked: false
+    - name: useForResearch
+      label: Use my data for research
+      detail: Anonymised, optional, and unrelated to your care
+      default-checked: false

@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.16</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.gbg.samples</groupId>
+  <artifactId>onboarding-service-sdk</artifactId>
+  <version>0.1.0</version>
+  <name>onboarding-service-sdk</name>
+  <description>
+    Thin-proxy onboarding microservice — Java implementation built on the
+    official GBG Go Core SDK (com.gbg:go-core-sdk) rather than hand-rolled
+    HTTP. Holds the GBG Go client credentials, mints and refreshes access
+    tokens via the SDK's tokens().generate(), forwards interaction traffic
+    through sdk.journeys()/sdk.interactions(), and keeps the session-to-
+    instance mapping. Implements the same REST contract as
+    onboarding-service ("Market onboarding applications - front-end
+    handoff", section 2) so the two implementations are drop-in
+    replacements for each other from the front end's point of view.
+  </description>
+
+  <properties>
+    <java.version>21</java.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>2.9.0</version>
+    </dependency>
+
+    <!-- The official GBG Go Core SDK — replaces api-implementation's hand-rolled
+         go/live/** RestClient calls. Alpha release; see sdk-implementation/README.md
+         and docs/sdk-jar-inspection/FINDINGS.md for what was verified against its
+         real generated source before writing go/sdk/**. -->
+    <dependency>
+      <groupId>com.gbg</groupId>
+      <artifactId>go-core-sdk</artifactId>
+      <version>0.1.0-alpha01</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+              <version>${lombok.version}</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+            </exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
