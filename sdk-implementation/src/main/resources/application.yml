@@ -18,6 +18,15 @@ go:
   # Only read when go.mode=live — never commit real values, set via env vars.
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
+  # Password grant only (the nonprod fabric tenants) — ignored under
+  # client_credentials. Every market's own application-<market>.yml
+  # previously documented these two env vars (.env.example, run.sh) without
+  # actually binding them anywhere, so setting them had no effect and
+  # password-grant token minting failed silently. Wired here, once, so every
+  # market profile inherits it rather than repeating the same two lines four
+  # times.
+  username: ${GBG_USERNAME:}
+  password: ${GBG_PASSWORD:}
 
 session:
   ttl-minutes: 30

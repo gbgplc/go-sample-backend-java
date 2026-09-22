@@ -249,11 +249,15 @@ four `SubmitInteractionBiometric{1,2,3,4}` variants while writing
 
 This implementation uses **`SubmitInteractionBiometric4`**, not Biometric1 —
 a deliberate correction to FINDINGS.md's guess, made during implementation
-rather than at the spike stage. It is still **unverified against a live
-journey's `collects` response**, which is the only place the actual
-discriminator a given Liveness Verification module expects would show up.
-If a live submit is rejected on the biometric element, this is the first
-thing to check.
+rather than at the spike stage. **Confirmed live 2026-09-18** against Meridian
+Health on the public platform: a full journey (personal details → contact →
+address → document capture → selfie capture) submitted a selfie with this
+exact shape, and the submit call was accepted with no error — a schema
+mismatch on the biometric element would have surfaced as an immediate 400 on
+that call, not later. Not yet confirmed against Northbank or Ridgeline Play's
+own Liveness Verification modules specifically; if a live submit is ever
+rejected on the biometric element on a market not yet exercised this way,
+this is still the first thing to check.
 
 **(e) `journeys().start()`'s prefill destination is a judgment call.**
 Api-implementation's raw request nested the prefill map at

@@ -474,12 +474,29 @@ class SdkInteractionMapperTest {
     }
 
     @Test
-    void aModuleWithNoResultYetFallsBackToItsOwnClassification() {
+    void aModuleWithNoResultYetAndNoClassificationDefaultsToRunning() {
         Map<String, Object> notYetRun = stepMap("Liveness Verification", null, null, null);
 
         RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.RUNNING);
+    }
+
+    /**
+     * The case the previous test's name actually claimed to cover: a step
+     * with no {@code result} object yet (so {@code mapModuleState} can't
+     * switch on a status) but a real {@code outcomeClassification} already
+     * present. Passing {@code null} for both (as the RUNNING-default test
+     * above does) never reaches the classify(outcomeClassification, ...)
+     * branch at all — this does.
+     */
+    @Test
+    void aModuleWithNoResultYetFallsBackToItsOwnClassification() {
+        Map<String, Object> notYetRun = stepMap("Liveness Verification", "positive", null, null);
+
+        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
+
+        assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
 
     // --- toRecord: journey name, reference, timestamps, total time, per-module timing and document type ---

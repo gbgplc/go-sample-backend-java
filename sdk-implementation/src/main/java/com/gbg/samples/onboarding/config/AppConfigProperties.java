@@ -27,7 +27,8 @@ public record AppConfigProperties(
          * Where the Consent Collection module's agreement wording lives — Go
          * stores this URL against the consent record it creates, so it must be
          * a real, stable location a real deployment can point at. Live-mode,
-         * Meridian-Health-journey-shaped only; see {@code GoInteractionSubmitRequest}.
+         * Meridian-Health-journey-shaped only; see
+         * {@code SdkInteractionMapper.consentRecord}.
          */
         @DefaultValue("https://meridianhealth.example/consent/record-access-v1") String consentUrl
 ) {

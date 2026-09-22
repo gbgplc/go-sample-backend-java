@@ -75,13 +75,7 @@ public class GoSdkClient implements GoClient {
     private final Map<String, List<String>> lastOutstandingByInstance = boundedMap();
     private final Map<String, List<String>> lastInstructionsByInstance = boundedMap();
     private final Map<String, List<String>> lastCollectableByInstance = boundedMap();
-    private final Map<String, Set<String>> completedStagesByInstance = Collections.synchronizedMap(
-            new LinkedHashMap<>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Set<String>> eldest) {
-                    return size() > MAX_CACHED_INSTANCES;
-                }
-            });
+    private final Map<String, Set<String>> completedStagesByInstance = boundedMap();
 
     private static <V> Map<String, V> boundedMap() {
         return Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
@@ -294,15 +288,26 @@ public class GoSdkClient implements GoClient {
     private GoState fetchGoState(String instanceId) {
         String token = authService.accessToken();
         Go go = currentGoClient(token);
-        GetJourneyStateResponse response = call(() -> go.journeys().getState(new GetJourneyStateRequest(instanceId)));
-        GetJourneyStateResponseBody body = response.object().orElse(null);
-        if (body == null) {
-            throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
+        try {
+            GetJourneyStateResponse response = call(() -> go.journeys().getState(new GetJourneyStateRequest(instanceId)));
+            GetJourneyStateResponseBody body = response.object().orElse(null);
+            if (body == null) {
+                throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
+            }
+            Map<String, Object> rawStateBody = rawStateHttpClient.takeLastStateFetchBody()
+                    .map(this::parseRawStateBody)
+                    .orElse(Map.of());
+            return new GoState(body, rawStateBody);
+        } finally {
+            // takeLastStateFetchBody() already clears on the success path above;
+            // this is the failure path's clear — call() throwing (or body being
+            // null) skips straight past it otherwise, leaving the captured bytes
+            // pinned to this pooled thread's RawStateBodyCapturingHttpClient
+            // ThreadLocal until some later call on the same thread happens to
+            // overwrite or read it. A second read here is a safe no-op once the
+            // success path has already cleared it.
+            rawStateHttpClient.takeLastStateFetchBody();
         }
-        Map<String, Object> rawStateBody = rawStateHttpClient.takeLastStateFetchBody()
-                .map(this::parseRawStateBody)
-                .orElse(Map.of());
-        return new GoState(body, rawStateBody);
     }
 
     @SuppressWarnings("unchecked")
@@ -326,10 +331,18 @@ public class GoSdkClient implements GoClient {
         Object ref = data == null ? null : data.get("attachmentRef");
         if (ref == null) return data;
 
-        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, null);
-        if (outstanding == null) {
-            outstanding = fetchOutstanding(instanceId);
+        if (!lastOutstandingByInstance.containsKey(instanceId)) {
+            // Cache miss: fetchInteractionInternal() populates all three
+            // caches this method reads (outstanding, instructions,
+            // collectable) from one fetch — the same call every other read
+            // of this instance already goes through. Previously this used a
+            // narrower one-off fetch (fetchOutstanding, since removed) that
+            // only ever populated `outstanding`, silently leaving
+            // instructions/collectable empty on a cold cache for the very
+            // checks right below that read them.
+            fetchInteractionInternal(instanceId);
         }
+        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
 
         if (lastInstructionsByInstance.getOrDefault(instanceId, List.of()).stream()
                         .anyMatch("Side2Required"::equalsIgnoreCase)
@@ -354,18 +367,6 @@ public class GoSdkClient implements GoClient {
         rewritten.remove("attachmentRef");
         rewritten.put(document ? "documentImage" : "selfieImage", ref);
         return rewritten;
-    }
-
-    private List<String> fetchOutstanding(String instanceId) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
-        FetchInteractionSecurity security = new FetchInteractionSecurity(token);
-        FetchInteractionResponse response = call(() -> go.interactions()
-                .fetch(new FetchInteractionRequest(instanceId), security));
-        return response.oneOf()
-                .flatMap(FetchInteractionResponseBody::responseBody1)
-                .map(b -> b.outstanding().orElse(List.of()))
-                .orElse(List.of());
     }
 
     private static JourneyStatus statusFrom(Interaction interaction) {

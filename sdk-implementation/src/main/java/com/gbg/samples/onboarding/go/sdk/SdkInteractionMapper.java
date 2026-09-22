@@ -1164,12 +1164,14 @@ public class SdkInteractionMapper {
                 case DOCUMENT_SIDE1 -> mergeDocument(documents, true, text);
                 case DOCUMENT_SIDE2 -> mergeDocument(documents, false, text);
                 case SELFIE -> biometrics.add(SubmitInteractionBiometricUnion.of(
-                        // See this module's README "Known gaps": SubmitInteractionBiometric1's
-                        // face1Image/face2Image both being @Nonnull rules it out for a flow that
-                        // only ever captures one selfie image — Biometric4's single, required
-                        // `selfieImage` field is the closest structural match (same field name as
-                        // today's raw shape, no second image this client doesn't have). Unverified
-                        // against a live journey's actual `collects` discriminator.
+                        // SubmitInteractionBiometric1's face1Image/face2Image both being @Nonnull
+                        // rules it out for a flow that only ever captures one selfie image —
+                        // Biometric4's single, required `selfieImage` field is the structural
+                        // match (same field name as the old raw-HTTP shape, no second image this
+                        // client doesn't have). Confirmed live 2026-09-18 (Meridian Health,
+                        // public platform): the submit call accepted this shape without error and
+                        // the journey progressed to a real decision — a schema mismatch here would
+                        // have surfaced as an immediate 400 on the submit itself, not later.
                         new SubmitInteractionBiometric4(text)));
                 case DROPPED -> { /* logged in forKey() */ }
             }

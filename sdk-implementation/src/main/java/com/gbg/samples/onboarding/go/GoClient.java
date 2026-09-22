@@ -12,8 +12,10 @@ import java.util.Map;
  * /journey/interaction/submit, /journey/state/fetch). Two implementations:
  * {@link com.gbg.samples.onboarding.go.mock.MockGoClient} for local/demo
  * running with no live credentials, and
- * {@link com.gbg.samples.onboarding.go.live.GoApiClient} for the real thing.
- * The session layer never knows which one is wired in.
+ * {@link com.gbg.samples.onboarding.go.sdk.GoSdkClient} for the real thing,
+ * built on {@code com.gbg:go-core-sdk} rather than hand-rolled HTTP (see
+ * api-implementation's own {@code GoClient} for the sibling built on raw
+ * HTTP directly). The session layer never knows which one is wired in.
  */
 public interface GoClient {
 
