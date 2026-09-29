@@ -10,7 +10,7 @@ app:
   accent-soft: "#FFEDE5"
   help-line: "Live chat is open 24 hours. Safer gambling tools are in Account."
   journey-name: GB player onboarding
-  resource-id: 1d10f195ec2d11e2d7a2d5ca8f2b77ebe4e940da102f857b300102fa0b2e4cde@5juix16t
+  resource-id: f450a552d8d236f6835eb98218229b45527290b8695ec19891505936bb9ff485@1slf8i7y
   cors-allowed-origins:
     - http://localhost:3002
 

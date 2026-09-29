@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -138,10 +139,8 @@ public class GoSdkClient implements GoClient {
 
     @Override
     public GoStartResult startJourney(String resourceId, Map<String, Object> prefill, String scenarioHint) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
         StartJourneyRequest request = mapper.toStartRequest(resourceId, prefill);
-        StartJourneyResponse response = call(() -> go.journeys().start(request));
+        StartJourneyResponse response = call(() -> authorized(token -> currentGoClient(token).journeys().start(request)));
         String instanceId = response.twoHundredApplicationJsonObject()
                 .map(b -> b.instanceId())
                 .or(() -> response.twoHundredAndOneApplicationJsonObject().map(b -> b.instanceId()))
@@ -169,11 +168,8 @@ public class GoSdkClient implements GoClient {
     }
 
     private SubmitInteractionResponseAlias fetchInteractionInternal(String instanceId) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
-        FetchInteractionSecurity security = new FetchInteractionSecurity(token);
-        FetchInteractionResponse response = call(() -> go.interactions()
-                .fetch(new FetchInteractionRequest(instanceId), security));
+        FetchInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
+                .fetch(new FetchInteractionRequest(instanceId), new FetchInteractionSecurity(token))));
         FetchInteractionResponseBody oneOf = response.oneOf().orElse(null);
         if (oneOf == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
@@ -231,11 +227,9 @@ public class GoSdkClient implements GoClient {
         String submittedStage = mapper.stageFor(payload.keySet(), completedStages(instanceId));
         log.debug("Submitting to Go: instance={} stage={} keys={}", instanceId, submittedStage, payload.keySet());
 
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
         SubmitInteractionRequest request = mapper.toSubmitRequest(instanceId, interactionId, payload, appConfig.consentUrl());
-        SubmitInteractionSecurity security = new SubmitInteractionSecurity(token);
-        SubmitInteractionResponse response = call(() -> go.interactions().submit(request, security));
+        SubmitInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
+                .submit(request, new SubmitInteractionSecurity(token))));
         throwIfSubmitError(response);
 
         if (submittedStage != null) {
@@ -289,10 +283,9 @@ public class GoSdkClient implements GoClient {
     }
 
     private GoState fetchGoState(String instanceId) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
         try {
-            GetJourneyStateResponse response = call(() -> go.journeys().getState(new GetJourneyStateRequest(instanceId)));
+            GetJourneyStateResponse response = call(() -> authorized(token -> currentGoClient(token).journeys()
+                    .getState(new GetJourneyStateRequest(instanceId))));
             GetJourneyStateResponseBody body = response.object().orElse(null);
             if (body == null) {
                 throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
@@ -389,6 +382,28 @@ public class GoSdkClient implements GoClient {
      * actually throws on 4XX/5XX (FINDINGS.md Q1; {@code GoException} is its
      * abstract base, {@code APIException} the concrete class).
      */
+    /**
+     * Runs {@code request} with the current access token, retrying once with a
+     * freshly minted one if Go answers 401/403. Without the retry, a token Go
+     * has stopped accepting (revoked, rotated early, clock skew) stays cached
+     * and every call fails until its expiry — up to an hour under
+     * client_credentials. Anything else — including a second rejection —
+     * propagates for {@link #call} to classify.
+     */
+    <T> T authorized(Function<String, T> request) {
+        String token = authService.accessToken();
+        try {
+            return request.apply(token);
+        } catch (APIException e) {
+            if (e.code() != 401 && e.code() != 403) {
+                throw e;
+            }
+            log.warn("GBG Go rejected the access token ({}); minting a new one and retrying once", e.code());
+            authService.invalidate(token);
+        }
+        return request.apply(authService.accessToken());
+    }
+
     <T> T call(Supplier<T> request) {
         try {
             return request.get();

@@ -36,6 +36,11 @@ go:
   # Only read when go.mode=live — never commit real values, set via env vars.
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
+  # Password grant only (the nonprod fabric tenants) — ignored under
+  # client_credentials. .env.example and run.sh ask for these; without this
+  # binding setting them had no effect.
+  username: ${GBG_USERNAME:}
+  password: ${GBG_PASSWORD:}
 
 session:
   ttl-minutes: 30

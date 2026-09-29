@@ -249,6 +249,12 @@ public class SdkInteractionMapper {
             // "Known gaps".
             return processingInteraction(interactionId);
         }
+        // Paused (e.g. awaiting a manual review): Go won't accept input, so
+        // picking a screen from `outstanding` would show a form it rejects.
+        // Same rule as DefaultInteractionMapper.
+        if (status == JourneyStatus.IN_PROGRESS) {
+            return processingInteraction(interactionId);
+        }
 
         List<String> collectable = collectableRefs(body);
         List<String> outstanding = collectable.isEmpty() ? outstandingRaw : collectable;

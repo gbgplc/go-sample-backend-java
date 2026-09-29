@@ -125,6 +125,26 @@ class OnboardingFlowIntegrationTest {
                 .andExpect(jsonPath("$.code").value("SESSION_EXPIRED"));
     }
 
+    /**
+     * Review finding 9: a fixed Max-Age outlived nothing — it expired 30
+     * minutes after start however active the customer was, while the
+     * server-side session (which slides on access) was still alive.
+     */
+    @Test
+    void theSessionCookieHasNoFixedLifetime() throws Exception {
+        MvcResult startResult = mockMvc.perform(post("/v1/sessions")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        assertThat(startResult.getResponse().getHeader("Set-Cookie"))
+                .startsWith("onboarding_session=")
+                .contains("HttpOnly")
+                .doesNotContain("Max-Age")
+                .doesNotContain("Expires");
+    }
+
     @Test
     void getConfigReturnsTheNorthbankBrand() throws Exception {
         mockMvc.perform(get("/v1/config"))

@@ -1,6 +1,7 @@
 package com.gbg.samples.onboarding.session;
 
 import com.gbg.samples.onboarding.config.SessionProperties;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -30,12 +31,32 @@ public class InMemorySessionStore implements SessionStore {
         if (session == null) {
             return Optional.empty();
         }
-        if (Duration.between(session.lastAccessedAt(), Instant.now()).compareTo(ttl) > 0) {
+        if (expired(session, Instant.now())) {
             sessions.remove(sessionId);
             return Optional.empty();
         }
         session.touch();
         return Optional.of(session);
+    }
+
+    /**
+     * Drops sessions nobody has come back for. {@link #find} only evicts the
+     * one it's asked about, so a session that is never looked up again — an
+     * abandoned tab, or a loop of unauthenticated {@code POST /v1/sessions} —
+     * would otherwise stay in memory for the life of the process.
+     */
+    @Scheduled(fixedDelayString = "PT1M")
+    public void evictExpired() {
+        Instant now = Instant.now();
+        sessions.values().removeIf(session -> expired(session, now));
+    }
+
+    int size() {
+        return sessions.size();
+    }
+
+    private boolean expired(Session session, Instant now) {
+        return Duration.between(session.lastAccessedAt(), now).compareTo(ttl) > 0;
     }
 
     @Override

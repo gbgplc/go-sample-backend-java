@@ -34,7 +34,6 @@ import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.time.Duration;
 
 /**
  * The REST contract from "Market onboarding applications — front-end
@@ -196,6 +195,11 @@ public class SessionController {
      * plain HTTP is silently dropped by curl, PowerShell, and most other
      * HTTP clients — found by testing this directly, not by inspection.
      * Behind real HTTPS in any other environment this is still `Secure`.
+     *
+     * <p>No {@code Max-Age}: a browser-session cookie, with expiry left to the
+     * server-side TTL, which slides on every call. A fixed Max-Age set at
+     * start ran out 30 minutes later however active the customer was, and
+     * they got "session ended" while their session was still alive.
      */
     private void setSessionCookie(HttpServletResponse response, String token, boolean secure) {
         ResponseCookie cookie = ResponseCookie.from(sessionProperties.cookieName(), token)
@@ -203,7 +207,6 @@ public class SessionController {
                 .secure(secure)
                 .sameSite("Lax")
                 .path("/v1/sessions")
-                .maxAge(Duration.ofMinutes(sessionProperties.ttlMinutes()))
                 .build();
         response.addHeader("Set-Cookie", cookie.toString());
     }

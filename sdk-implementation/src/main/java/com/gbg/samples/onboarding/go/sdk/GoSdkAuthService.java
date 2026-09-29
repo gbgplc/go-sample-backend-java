@@ -73,12 +73,37 @@ public class GoSdkAuthService {
     private volatile Instant cachedTokenExpiresAt = Instant.EPOCH;
 
     public GoSdkAuthService(GoSdkProperties properties) {
+        requireCredentials(properties);
         this.properties = properties;
         // TimeoutHttpClient: the SDK's default client has no timeout at all
         // (see its own javadoc) — without this, a stalled token endpoint
         // (a dropped connection, a slow Keycloak response on a fabric
         // tenant) hangs the minting thread forever.
         this.tokenClient = Go.builder().client(new TimeoutHttpClient()).build();
+    }
+
+    /**
+     * Fails startup in live mode when a credential the configured grant needs
+     * is blank, rather than starting fine and answering every customer with
+     * "Could not authenticate" at their first screen.
+     */
+    static void requireCredentials(GoSdkProperties properties) {
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        if (isBlank(properties.clientId())) missing.add("go.client-id (GBG_CLIENT_ID)");
+        if (isBlank(properties.clientSecret())) missing.add("go.client-secret (GBG_CLIENT_SECRET)");
+        if (properties.passwordGrant()) {
+            if (isBlank(properties.username())) missing.add("go.username (GBG_USERNAME)");
+            if (isBlank(properties.password())) missing.add("go.password (GBG_PASSWORD)");
+        }
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("go.mode=live with grant-type " + properties.grantType()
+                    + " but these are not set: " + String.join(", ", missing)
+                    + ". Put them in .env.local (see .env.example) or run with go.mode=mock.");
+        }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     /**
@@ -102,6 +127,19 @@ public class GoSdkAuthService {
                 return cachedToken;
             }
             return mintToken();
+        }
+    }
+
+    /**
+     * Drops {@code rejected} from the cache after Go answered 401/403 to it —
+     * revoked, rotated early, or clock skew — so the next {@link #accessToken}
+     * mints instead of handing the same dead token out until its expiry. A
+     * no-op if another thread has already replaced it.
+     */
+    public synchronized void invalidate(String rejected) {
+        if (rejected != null && rejected.equals(cachedToken)) {
+            cachedToken = null;
+            cachedTokenExpiresAt = Instant.EPOCH;
         }
     }
 

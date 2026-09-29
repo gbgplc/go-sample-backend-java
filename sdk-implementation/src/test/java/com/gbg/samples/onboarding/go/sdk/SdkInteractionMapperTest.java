@@ -91,6 +91,20 @@ class SdkInteractionMapperTest {
                 new StagePlanEntry("Biometrics", StageState.ACTIVE));
     }
 
+    /** Review finding 7: a Paused journey still lists outstanding elements but accepts no input. */
+    @Test
+    void aPausedJourneyShowsProcessingNotAnInputScreen() {
+        ResponseBody1 paused = ResponseBody1.builder()
+                .instanceId("instance-1")
+                .interactionId("int-1")
+                .journey(new Journey1(JourneyStatus1.PAUSED))
+                .interaction(new com.gbg.gocore.models.operations.Interaction(List.of(), List.of(), "gr-1"))
+                .outstanding(List.of("PrimaryDocument/side1Image"))
+                .build();
+
+        assertThat(mapper.toInteraction(paused).kind()).isEqualTo(ScreenKind.PROCESSING);
+    }
+
     @Test
     void anElementNoConfiguredStageClaimsFallsBackToAGenericFormInsteadOfStalling() {
         Interaction interaction = mapper.toInteraction(fetchResponseWithOutstanding(
