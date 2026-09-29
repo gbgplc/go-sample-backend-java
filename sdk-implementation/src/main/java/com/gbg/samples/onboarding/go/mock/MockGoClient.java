@@ -184,14 +184,16 @@ public class MockGoClient implements GoClient {
         // the target scenario's own step list (both share the prefix up to here).
         if (step.getKind() == com.gbg.samples.onboarding.api.dto.ScreenKind.CHOICE && step.getOptions() != null) {
             Object chosenValue = data == null ? null : data.get("value");
-            step.getOptions().stream()
+            // A value matching no option is a client bug, not a choice —
+            // advancing anyway would hide it behind whichever branch is default.
+            var chosen = step.getOptions().stream()
                     .filter(o -> o.getValue().equals(chosenValue))
                     .findFirst()
-                    .ifPresent(chosen -> {
-                        if (chosen.getBranchTo() != null && !chosen.getBranchTo().equals(instance.scenarioId)) {
-                            instance.scenarioId = chosen.getBranchTo();
-                        }
-                    });
+                    .orElseThrow(() -> OnboardingException.validationFailed(
+                            "Choose one of the options to continue.", null));
+            if (chosen.getBranchTo() != null && !chosen.getBranchTo().equals(instance.scenarioId)) {
+                instance.scenarioId = chosen.getBranchTo();
+            }
         }
 
         List<ScenarioStep> targetSteps = scenario(instance).getSteps();

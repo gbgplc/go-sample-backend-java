@@ -58,6 +58,19 @@ public class GoSdkAuthService {
 
     private static final Logger log = LoggerFactory.getLogger(GoSdkAuthService.class);
     private static final long REFRESH_MARGIN_SECONDS = 30;
+    /**
+     * Assumed lifetime when the token response omits {@code expires_in}: the
+     * shortest seen on these tenants (Keycloak). Without it a missing field
+     * read as 0, the token counted as expired at once, and every call minted
+     * a new one — and rebuilt GoSdkClient's {@code Go} instance with it.
+     */
+    static final long DEFAULT_TTL_SECONDS = 300;
+
+    /** How long to cache a token Go says lasts {@code expiresIn} seconds (null or ≤0 if it didn't say). */
+    static long cacheSeconds(Long expiresIn) {
+        long ttl = expiresIn == null || expiresIn <= 0 ? DEFAULT_TTL_SECONDS : expiresIn;
+        return Math.max(0, ttl - REFRESH_MARGIN_SECONDS);
+    }
 
     private final GoSdkProperties properties;
     /**
@@ -153,8 +166,7 @@ public class GoSdkAuthService {
                 throw OnboardingException.upstreamUnavailable("Could not authenticate with the identity platform.");
             }
             cachedToken = body.accessToken().orElseThrow();
-            long expiresIn = body.expiresIn().orElse(0L);
-            cachedTokenExpiresAt = Instant.now().plusSeconds(Math.max(0, expiresIn - REFRESH_MARGIN_SECONDS));
+            cachedTokenExpiresAt = Instant.now().plusSeconds(cacheSeconds(body.expiresIn().orElse(null)));
             return cachedToken;
         } catch (APIException e) {
             log.error("Failed to mint a Go access token: {} {}", e.code(), e.bodyAsString().orElse(""), e);

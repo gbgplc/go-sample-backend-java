@@ -24,6 +24,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -112,6 +115,34 @@ class GoApiClientTest {
         assertThat(ex.fields()).containsExactly(
                 Map.entry("PersonalEmail/email", "Invalid email address"),
                 Map.entry("WorkEmail/email", "Invalid email address"));
+    }
+
+    /**
+     * Review finding 14: Go dropping {@code instructions} used to leave the
+     * last Side2Required cached, so the next capture — the selfie — was routed
+     * into the back of the document.
+     */
+    @Test
+    void aSide2RequiredGoNoLongerSendsIsNotLeftCached() {
+        when(tokens.accessToken()).thenReturn("good");
+        go.expect(requestTo(BASE + "journey/interaction/fetch")).andRespond(withSuccess(
+                "{\"instanceId\":\"i-1\",\"journey\":{\"status\":\"InProgress\"},\"processing\":true,"
+                        + "\"outstanding\":[],\"instructions\":[\"Side2Required\"]}", MediaType.APPLICATION_JSON));
+        go.expect(requestTo(BASE + "journey/interaction/fetch")).andRespond(withSuccess(
+                "{\"instanceId\":\"i-1\",\"journey\":{\"status\":\"InProgress\"},\"outstanding\":[\"Selfie/selfieImage\"]}",
+                MediaType.APPLICATION_JSON));
+        go.expect(requestTo(BASE + "journey/interaction/submit"))
+                .andExpect(content().string(containsString("\"biometrics\"")))
+                .andExpect(content().string(not(containsString("side2Image"))))
+                .andRespond(withSuccess("{\"status\":\"success\"}", MediaType.APPLICATION_JSON));
+        go.expect(requestTo(BASE + "journey/interaction/fetch"))
+                .andRespond(withSuccess(PROCESSING_FETCH, MediaType.APPLICATION_JSON));
+
+        client.fetchInteraction("i-1");
+        client.fetchInteraction("i-1");
+        client.submitInteraction("i-1", "int-1", Map.of("attachmentRef", "selfie-bytes"));
+
+        go.verify();
     }
 
     @Test

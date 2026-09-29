@@ -183,18 +183,14 @@ public class GoSdkClient implements GoClient {
         Optional<ResponseBody1> full = oneOf.responseBody1();
         if (full.isPresent()) {
             ResponseBody1 body = full.get();
-            List<String> outstanding = body.outstanding().orElse(null);
-            if (outstanding != null) {
-                lastOutstandingByInstance.put(instanceId, outstanding);
-            }
-            List<String> instructions = body.instructions().orElse(null);
-            if (instructions != null) {
-                lastInstructionsByInstance.put(instanceId, instructions);
-            }
+            // Always overwritten, empty when Go omits the field: keeping the
+            // last non-null value let a stale Side2Required outlive the
+            // document screen and route the selfie into side2Image.
+            List<String> outstanding = body.outstanding().orElse(List.of());
+            lastOutstandingByInstance.put(instanceId, outstanding);
+            lastInstructionsByInstance.put(instanceId, body.instructions().orElse(List.of()));
             List<String> collectable = SdkInteractionMapper.collectableRefs(body);
-            lastCollectableByInstance.put(instanceId, collectable.isEmpty()
-                    ? (outstanding == null ? List.of() : outstanding)
-                    : collectable);
+            lastCollectableByInstance.put(instanceId, collectable.isEmpty() ? outstanding : collectable);
             Interaction interaction = mapper.toInteraction(body, completedStages(instanceId));
             return new SubmitInteractionResponseAlias(statusFrom(interaction), interaction);
         }
@@ -229,7 +225,7 @@ public class GoSdkClient implements GoClient {
 
         SubmitInteractionRequest request = mapper.toSubmitRequest(instanceId, interactionId, payload, appConfig.consentUrl());
         SubmitInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
-                .submit(request, new SubmitInteractionSecurity(token))));
+                .submit(request, new SubmitInteractionSecurity(token))), mapper.fieldsByGoPath(payload));
         throwIfSubmitError(response);
 
         if (submittedStage != null) {
@@ -405,10 +401,26 @@ public class GoSdkClient implements GoClient {
     }
 
     <T> T call(Supplier<T> request) {
+        return call(request, Map.of());
+    }
+
+    /**
+     * @param fieldsByGoPath for a submit, where each submitted field landed in
+     *                       the request (see {@link SdkInteractionMapper#fieldsByGoPath}),
+     *                       so a 400/422 can name the fields Go rejected.
+     */
+    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath) {
         try {
             return request.get();
         } catch (APIException e) {
-            log.warn("GBG Go call failed: {} {}", e.code(), e.bodyAsString().orElse(""));
+            String body = e.bodyAsString().orElse("");
+            log.warn("GBG Go call failed: {} {}", e.code(), body);
+            if ((e.code() == 400 || e.code() == 422) && !fieldsByGoPath.isEmpty()) {
+                Map<String, String> fields = rejectedFields(goProblems(body), fieldsByGoPath);
+                if (!fields.isEmpty()) {
+                    throw OnboardingException.validationFailed("Some of the details you entered could not be verified.", fields);
+                }
+            }
             throw classifyCode(e.code());
         } catch (OnboardingException e) {
             throw e;
@@ -451,6 +463,38 @@ public class GoSdkClient implements GoClient {
         if (response.oneOf().orElse(null) instanceof SubmitInteractionError error) {
             throw classifyInBandError(error);
         }
+    }
+
+    /** Every {@code errors[].problem} in a Go error body, joined with "; " — empty if it isn't that shape. */
+    static String goProblems(String body) {
+        try {
+            List<String> problems = new java.util.ArrayList<>();
+            JSON.getMapper().readTree(body).path("errors").forEach(error -> {
+                String problem = error.path("problem").asText("");
+                if (!problem.isBlank()) problems.add(problem);
+            });
+            return String.join("; ", problems);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * Submitted field → Go's message, for every {@code path: message} segment
+     * in {@code problems} whose path is one this submit sent (live format,
+     * 2026-09-29: {@code context.subject.identity.emails.0.email: Invalid email address}).
+     */
+    static Map<String, String> rejectedFields(String problems, Map<String, String> fieldsByGoPath) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String segment : problems.split(";\\s*")) {
+            int colon = segment.indexOf(": ");
+            if (colon <= 0) continue;
+            String field = fieldsByGoPath.get(segment.substring(0, colon).trim());
+            if (field != null) {
+                fields.putIfAbsent(field, segment.substring(colon + 2).trim());
+            }
+        }
+        return fields;
     }
 
     private static OnboardingException classifyCode(int code) {

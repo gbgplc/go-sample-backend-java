@@ -10,6 +10,7 @@ import com.gbg.samples.onboarding.api.dto.StartSessionResponse;
 import com.gbg.samples.onboarding.api.dto.StateResponse;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionRequest;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionResponse;
+import com.gbg.samples.onboarding.config.OpenApiConfig;
 import com.gbg.samples.onboarding.config.SessionProperties;
 import com.gbg.samples.onboarding.session.SessionService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -93,7 +94,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @GetMapping("/v1/sessions/{id}/interaction")
     public Interaction getInteraction(
             @PathVariable("id") String sessionId,
@@ -114,7 +115,7 @@ public class SessionController {
             @ApiResponse(responseCode = "422", description = "Field-level validation failure",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @PostMapping("/v1/sessions/{id}/interaction")
     public SubmitInteractionResponse submitInteraction(
             @PathVariable("id") String sessionId,
@@ -131,7 +132,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @GetMapping("/v1/sessions/{id}/state")
     public StateResponse getState(
             @PathVariable("id") String sessionId,
@@ -147,7 +148,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @GetMapping("/v1/sessions/{id}/record")
     public RecordResponse getRecord(
             @PathVariable("id") String sessionId,
@@ -164,7 +165,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @PostMapping("/v1/sessions/{id}/attachments")
     public AttachmentResponse uploadAttachment(
             @PathVariable("id") String sessionId,

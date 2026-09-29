@@ -20,6 +20,15 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class OpenApiConfig {
 
+    /**
+     * The key the session-cookie scheme is registered under, and that every
+     * {@code @SecurityRequirement} names. Fixed, unlike the cookie name
+     * itself ({@code session.cookie-name}): when the key tracked the cookie
+     * name, renaming the cookie left the requirements pointing at a scheme
+     * that no longer existed and Swagger UI stopped sending it.
+     */
+    public static final String SESSION_SCHEME = "sessionCookie";
+
     @Bean
     public OpenAPI onboardingOpenApi(AppConfigProperties appConfig, SessionProperties sessionProperties) {
         String cookieName = sessionProperties.cookieName();
@@ -36,7 +45,7 @@ public class OpenApiConfig {
                         .contact(new Contact().name("GBG Go samples")))
                 .addServersItem(new Server().url("/").description("This deployment"))
                 .components(new Components()
-                        .addSecuritySchemes(cookieName, new SecurityScheme()
+                        .addSecuritySchemes(SESSION_SCHEME, new SecurityScheme()
                                 .type(SecurityScheme.Type.APIKEY)
                                 .in(SecurityScheme.In.COOKIE)
                                 .name(cookieName)

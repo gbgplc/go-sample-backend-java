@@ -3,6 +3,7 @@ package com.gbg.samples.onboarding.go.live;
 import com.gbg.samples.onboarding.config.GoProperties;
 import org.junit.jupiter.api.Test;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -25,6 +26,14 @@ class GoTokenServiceTest {
         assertThatThrownBy(() -> GoTokenService.requireCredentials(props("client_credentials", "id", " ", null, null)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("GBG_CLIENT_SECRET");
+    }
+
+    /** Review finding 13: a missing expires_in used to read as 0, so every call minted a new token. */
+    @Test
+    void aMissingOrZeroExpiryFallsBackToADefaultLifetime() {
+        assertThat(GoTokenService.cacheSeconds(null)).isEqualTo(GoTokenService.DEFAULT_TTL_SECONDS - 30);
+        assertThat(GoTokenService.cacheSeconds(0L)).isEqualTo(GoTokenService.DEFAULT_TTL_SECONDS - 30);
+        assertThat(GoTokenService.cacheSeconds(3600L)).isEqualTo(3570);
     }
 
     @Test

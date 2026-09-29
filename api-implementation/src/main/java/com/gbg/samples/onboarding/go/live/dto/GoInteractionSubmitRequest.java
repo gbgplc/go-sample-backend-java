@@ -63,7 +63,9 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
         }
 
         data.forEach((key, value) -> {
-            if (CONSENT_KEYS.contains(key)) return;
+            // A null would otherwise go out as the string "null" (e.g.
+            // email:"null", which Go rejects).
+            if (CONSENT_KEYS.contains(key) || value == null) return;
             FieldMapping mapping = FieldMapping.forKey(key);
             participants.add(new Participant(mapping.domainElementId()));
             mapping.place(subject, value);
@@ -90,7 +92,7 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
         }
         Map<String, Object> subject = new LinkedHashMap<>();
         data.forEach((key, value) -> {
-            if (CONSENT_KEYS.contains(key)) return;
+            if (CONSENT_KEYS.contains(key) || value == null) return;
             byPath.put(FieldMapping.forKey(key).place(subject, value), key);
         });
         return byPath;

@@ -92,6 +92,26 @@ class OpenApiContractTest {
         );
     }
 
+    /**
+     * Review finding 19: every endpoint's security requirement must name a
+     * scheme that exists. The requirement was a hard-coded key while the scheme
+     * was registered under the configurable cookie name, so renaming the
+     * cookie broke Swagger UI's "try it" silently.
+     */
+    @Test
+    void everySecurityRequirementNamesARegisteredScheme() throws Exception {
+        JsonNode spec = fetchSpec();
+        JsonNode schemes = spec.at("/components/securitySchemes");
+        assertThat(schemes.at("/sessionCookie/name").asText()).isEqualTo("onboarding_session");
+        assertThat(schemes.at("/sessionCookie/in").asText()).isEqualTo("cookie");
+
+        List<String> registered = fieldNames(schemes);
+        spec.get("paths").forEach(path -> path.forEach(operation ->
+                operation.path("security").forEach(requirement ->
+                        assertThat(registered).containsAll(fieldNames(requirement)))));
+        assertThat(spec.at("/paths/~1v1~1sessions~1{id}~1state/get/security/0/sessionCookie").isMissingNode()).isFalse();
+    }
+
     private JsonNode schemaNamed(String name) throws Exception {
         JsonNode schema = fetchSpec().at("/components/schemas/" + name);
         assertThat(schema.isMissingNode())

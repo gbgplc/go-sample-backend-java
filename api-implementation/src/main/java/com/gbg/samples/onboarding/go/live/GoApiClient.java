@@ -178,12 +178,11 @@ public class GoApiClient implements GoClient {
         if (response == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
         }
-        if (response.outstanding() != null) {
-            lastOutstandingByInstance.put(instanceId, response.outstanding());
-        }
-        if (response.instructions() != null) {
-            lastInstructionsByInstance.put(instanceId, response.instructions());
-        }
+        // Always overwritten, empty when Go omits the field: keeping the last
+        // non-null value let a stale Side2Required outlive the document
+        // screen and route the selfie into documents[0].side2Image.
+        lastOutstandingByInstance.put(instanceId, response.outstanding() == null ? List.of() : response.outstanding());
+        lastInstructionsByInstance.put(instanceId, response.instructions() == null ? List.of() : response.instructions());
         // Same precedence as toInteraction below: collects when the
         // interaction carries any, otherwise raw outstanding.
         List<String> collectable = response.collects().stream()
@@ -317,9 +316,13 @@ public class GoApiClient implements GoClient {
         Object ref = data == null ? null : data.get("attachmentRef");
         if (ref == null) return data;
 
-        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, null);
+        List<String> outstanding = lastOutstandingByInstance.get(instanceId);
         if (outstanding == null) {
-            outstanding = fetchOutstanding(instanceId);
+            // Nothing cached (e.g. just after a restart): a full fetch fills
+            // the outstanding, instructions and collectable caches together,
+            // since all three are read below.
+            fetchInteraction(instanceId);
+            outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
         }
 
         // Which capture this is, from the stage the customer is actually on.
@@ -366,16 +369,6 @@ public class GoApiClient implements GoClient {
         rewritten.remove("attachmentRef");
         rewritten.put(document ? "documentImage" : "selfieImage", ref);
         return rewritten;
-    }
-
-    private List<String> fetchOutstanding(String instanceId) {
-        GoInteractionFetchResponse response = call(token -> client.post()
-                .uri("journey/interaction/fetch")
-                .header("Authorization", "Bearer " + token)
-                .body(new GoInstanceRequest(instanceId))
-                .retrieve()
-                .body(GoInteractionFetchResponse.class));
-        return response == null || response.outstanding() == null ? List.of() : response.outstanding();
     }
 
     private static JourneyStatus statusFrom(Interaction interaction) {
