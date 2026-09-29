@@ -33,10 +33,12 @@ import java.util.Optional;
  * "Referred" regardless of the real outcome — {@code mapDecision} was never
  * wrong, it was correctly defaulting on data that never arrived.
  *
- * <p>This wraps the SDK's own {@link SpeakeasyHTTPClient} rather than
- * replacing it — every request still goes out through the SDK (same URL
- * construction, headers, auth, hooks), and every response the SDK itself
- * still deserializes normally. Only for a {@code journey/state/fetch}
+ * <p>This wraps the SDK's own {@link SpeakeasyHTTPClient} (via
+ * {@link TimeoutHttpClient}, which also gives every request here the fixed
+ * timeout neither {@code Go} instance had before — see its own javadoc)
+ * rather than replacing it — every request still goes out through the SDK
+ * (same URL construction, headers, auth, hooks), and every response the SDK
+ * itself still deserializes normally. Only for a {@code journey/state/fetch}
  * request does this class additionally buffer the raw bytes before handing
  * an equivalent, still-fully-readable response back to the SDK, so
  * {@link GoSdkClient} can separately parse the same bytes with a plain
@@ -52,7 +54,7 @@ import java.util.Optional;
  */
 final class RawStateBodyCapturingHttpClient implements HTTPClient {
 
-    private final HTTPClient delegate = new SpeakeasyHTTPClient();
+    private final HTTPClient delegate = new TimeoutHttpClient();
     private final ThreadLocal<byte[]> lastStateFetchBody = new ThreadLocal<>();
 
     @Override

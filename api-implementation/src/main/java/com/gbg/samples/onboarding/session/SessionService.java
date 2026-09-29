@@ -74,17 +74,24 @@ public class SessionService {
         // goClient.submitInteraction, which is exactly what the idempotency
         // check exists to prevent.
         synchronized (session) {
-            if (session.isRetryOf(interactionId, data)) {
+            // Fetched once, up front — both the retry check below (which
+            // needs the stage to tell two data-less screens apart, see
+            // Session.isRetryOf) and requireCollectedFields need the current
+            // interaction, and this is the only Go call among the two.
+            Interaction current = goClient.fetchInteraction(session.goInstanceId()).interaction();
+            String stage = current == null ? null : current.stage();
+
+            if (session.isRetryOf(interactionId, stage, data)) {
                 return session.cachedResponse();
             }
             if (session.currentInteractionId() != null && !session.currentInteractionId().equals(interactionId)) {
                 throw OnboardingException.interactionStale("This step has moved on. Refetching the current one.");
             }
 
-            requireCollectedFields(session, data);
+            requireCollectedFields(current, data);
 
             SubmitInteractionResponse response = goClient.submitInteraction(session.goInstanceId(), interactionId, data);
-            session.recordAdvance(interactionId, data, response);
+            session.recordAdvance(interactionId, stage, data, response);
             return response;
         }
     }
@@ -108,8 +115,7 @@ public class SessionService {
      * explicit true blocks, so an unknown requirement is never invented. A
      * value of whitespace alone is not an answer.
      */
-    private void requireCollectedFields(Session session, Map<String, Object> data) {
-        Interaction current = goClient.fetchInteraction(session.goInstanceId()).interaction();
+    private void requireCollectedFields(Interaction current, Map<String, Object> data) {
         if (current == null || current.collects() == null) {
             return;
         }

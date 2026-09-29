@@ -52,11 +52,29 @@ public class GoTokenService {
         this.authClient = builder.build();
     }
 
-    public synchronized String accessToken() {
-        if (cachedToken != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
-            return cachedToken;
+    /**
+     * Double-checked rather than a single {@code synchronized} guarding both
+     * the cache read and the mint: with one lock around the whole method,
+     * every caller — including ones holding a perfectly valid cached token —
+     * queued behind whichever thread was minting, and a stalled auth-server
+     * response (this client has no HTTP timeout configured either — see
+     * {@code RestClient.Builder}) meant every request thread in the pool
+     * blocked on that lock indefinitely. {@code cachedToken}/
+     * {@code cachedTokenExpiresAt} are already {@code volatile}, so the fast
+     * path below is safe unsynchronized; only an actual expiry contends for
+     * the lock, and only briefly.
+     */
+    public String accessToken() {
+        String token = cachedToken;
+        if (token != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
+            return token;
         }
-        return mintToken();
+        synchronized (this) {
+            if (cachedToken != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
+                return cachedToken;
+            }
+            return mintToken();
+        }
     }
 
     private String mintToken() {

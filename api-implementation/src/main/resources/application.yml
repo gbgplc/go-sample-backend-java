@@ -6,6 +6,24 @@ spring:
     name: onboarding-service
   jackson:
     default-property-inclusion: non_null
+  # Applies to every auto-configured RestClient.Builder — both GoTokenService
+  # and GoApiClient build their client from one. Neither had any timeout
+  # configured before: a stalled Go call (or a stalled auth-server response
+  # during a token refresh, which GoTokenService.accessToken() mints while
+  # holding a lock) hung the calling thread indefinitely instead of failing
+  # fast and letting OnboardingException.upstreamUnavailable do its job.
+  http:
+    client:
+      connect-timeout: 5s
+      read-timeout: 15s
+  servlet:
+    multipart:
+      # Boot's own default (1MB) rejects a typical phone photo of a document
+      # or selfie outright — MaxUploadSizeExceededException, mapped by
+      # GlobalExceptionHandler to 413 PAYLOAD_TOO_LARGE. 10MB covers a
+      # realistic capture without inviting an oversized upload.
+      max-file-size: 10MB
+      max-request-size: 10MB
 
 app:
   market: northbank

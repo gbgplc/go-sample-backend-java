@@ -74,14 +74,35 @@ public class GoSdkAuthService {
 
     public GoSdkAuthService(GoSdkProperties properties) {
         this.properties = properties;
-        this.tokenClient = Go.builder().build();
+        // TimeoutHttpClient: the SDK's default client has no timeout at all
+        // (see its own javadoc) — without this, a stalled token endpoint
+        // (a dropped connection, a slow Keycloak response on a fabric
+        // tenant) hangs the minting thread forever.
+        this.tokenClient = Go.builder().client(new TimeoutHttpClient()).build();
     }
 
-    public synchronized String accessToken() {
-        if (cachedToken != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
-            return cachedToken;
+    /**
+     * Double-checked rather than a single {@code synchronized} guarding both
+     * the cache read and the mint — the go-core-sdk sibling of the same fix
+     * in api-implementation's {@code GoTokenService}. With one lock around
+     * the whole method, every caller — including ones holding a perfectly
+     * valid cached token — queued behind whichever thread was minting, and a
+     * stalled auth-server response meant every request thread blocked
+     * indefinitely. {@code cachedToken}/{@code cachedTokenExpiresAt} are
+     * already {@code volatile}, so the fast path below is safe
+     * unsynchronized; only an actual expiry contends for the lock.
+     */
+    public String accessToken() {
+        String token = cachedToken;
+        if (token != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
+            return token;
         }
-        return mintToken();
+        synchronized (this) {
+            if (cachedToken != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
+                return cachedToken;
+            }
+            return mintToken();
+        }
     }
 
     private String mintToken() {

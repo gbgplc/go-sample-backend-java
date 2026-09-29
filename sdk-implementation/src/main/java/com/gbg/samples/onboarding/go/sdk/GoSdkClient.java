@@ -15,7 +15,9 @@ import com.gbg.gocore.models.operations.ResponseBody1;
 import com.gbg.gocore.models.operations.ResponseBody2;
 import com.gbg.gocore.models.operations.StartJourneyRequest;
 import com.gbg.gocore.models.operations.StartJourneyResponse;
+import com.gbg.gocore.models.operations.SubmitInteractionError;
 import com.gbg.gocore.models.operations.SubmitInteractionRequest;
+import com.gbg.gocore.models.operations.SubmitInteractionResponse;
 import com.gbg.gocore.models.operations.SubmitInteractionSecurity;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.Interaction;
@@ -233,7 +235,8 @@ public class GoSdkClient implements GoClient {
         Go go = currentGoClient(token);
         SubmitInteractionRequest request = mapper.toSubmitRequest(instanceId, interactionId, payload, appConfig.consentUrl());
         SubmitInteractionSecurity security = new SubmitInteractionSecurity(token);
-        call(() -> go.interactions().submit(request, security));
+        SubmitInteractionResponse response = call(() -> go.interactions().submit(request, security));
+        throwIfSubmitError(response);
 
         if (submittedStage != null) {
             completedStagesByInstance
@@ -410,6 +413,29 @@ public class GoSdkClient implements GoClient {
         log.warn("GBG Go fetch-interaction returned an in-band error: {} {} {}",
                 error.status(), error.code(), error.message());
         return classifyCode((int) error.code());
+    }
+
+    /**
+     * {@code SubmitInteractionResponseBody} carries the same kind of in-band
+     * error on an otherwise-200 submit response — previously discarded
+     * entirely, which let a rejected submission (e.g. a stale interactionId)
+     * be marked completed and reported to the caller as a success anyway.
+     */
+    private OnboardingException classifyInBandError(SubmitInteractionError error) {
+        log.warn("GBG Go submit-interaction returned an in-band error: {} {} {}",
+                error.status(), error.code(), error.message());
+        return classifyCode((int) error.code());
+    }
+
+    /**
+     * Package-private so {@code GoSdkClientSubmitInteractionErrorTest} can
+     * exercise it directly against a hand-built {@link SubmitInteractionResponse},
+     * the same way {@link #call} is tested without a live Go call.
+     */
+    void throwIfSubmitError(SubmitInteractionResponse response) {
+        if (response.oneOf().orElse(null) instanceof SubmitInteractionError error) {
+            throw classifyInBandError(error);
+        }
     }
 
     private static OnboardingException classifyCode(int code) {
