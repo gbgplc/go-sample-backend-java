@@ -10,7 +10,7 @@ app:
   accent-soft: "#F5F5FC"
   help-line: "Call 0800 000 000, or carry on in a branch with the same reference."
   journey-name: UK retail account opening
-  resource-id: f3d875bc2ebff66f557fb177646f4c80e453d8d064b92a53fd1079edded1ea91@5q2gadns
+  resource-id: 71da427957b893eb008c13678b72dcf05cfe50aff0b6479f53bc0a27ff23850c@r91oi63g
   cors-allowed-origins:
     - http://localhost:3000
     # 3000 is the app's pinned port; 3010 is a fallback for when something
@@ -26,9 +26,10 @@ app:
 # tenant was provisioned in, and set go.region to the same value.
 #
 # Running against a nonprod fabric tenant instead? It uses a Keycloak realm and
-# the password grant, so override auth-url, base-url, grant-type and scope, and
-# supply username and password alongside the client credentials. Put that in a
-# local profile or env vars rather than here â€” this file ships to customers.
+# the password grant, so override auth-url, base-url, grant-type and scope
+# here, and set GBG_USERNAME/GBG_PASSWORD alongside the client credentials --
+# both are already wired to go.username/go.password in application.yml, read
+# only under grant-type: password.
 go:
   auth-url: https://api.auth.gbgplc.com/as/token.oauth2
   base-url: https://eu.platform.go.gbgplc.com/v2/captain/

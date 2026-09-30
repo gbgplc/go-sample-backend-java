@@ -15,7 +15,9 @@ import com.gbg.gocore.models.operations.ResponseBody1;
 import com.gbg.gocore.models.operations.ResponseBody2;
 import com.gbg.gocore.models.operations.StartJourneyRequest;
 import com.gbg.gocore.models.operations.StartJourneyResponse;
+import com.gbg.gocore.models.operations.SubmitInteractionError;
 import com.gbg.gocore.models.operations.SubmitInteractionRequest;
+import com.gbg.gocore.models.operations.SubmitInteractionResponse;
 import com.gbg.gocore.models.operations.SubmitInteractionSecurity;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.Interaction;
@@ -39,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -75,13 +78,7 @@ public class GoSdkClient implements GoClient {
     private final Map<String, List<String>> lastOutstandingByInstance = boundedMap();
     private final Map<String, List<String>> lastInstructionsByInstance = boundedMap();
     private final Map<String, List<String>> lastCollectableByInstance = boundedMap();
-    private final Map<String, Set<String>> completedStagesByInstance = Collections.synchronizedMap(
-            new LinkedHashMap<>(16, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Set<String>> eldest) {
-                    return size() > MAX_CACHED_INSTANCES;
-                }
-            });
+    private final Map<String, Set<String>> completedStagesByInstance = boundedMap();
 
     private static <V> Map<String, V> boundedMap() {
         return Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
@@ -142,10 +139,8 @@ public class GoSdkClient implements GoClient {
 
     @Override
     public GoStartResult startJourney(String resourceId, Map<String, Object> prefill, String scenarioHint) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
         StartJourneyRequest request = mapper.toStartRequest(resourceId, prefill);
-        StartJourneyResponse response = call(() -> go.journeys().start(request));
+        StartJourneyResponse response = call(() -> authorized(token -> currentGoClient(token).journeys().start(request)));
         String instanceId = response.twoHundredApplicationJsonObject()
                 .map(b -> b.instanceId())
                 .or(() -> response.twoHundredAndOneApplicationJsonObject().map(b -> b.instanceId()))
@@ -173,11 +168,8 @@ public class GoSdkClient implements GoClient {
     }
 
     private SubmitInteractionResponseAlias fetchInteractionInternal(String instanceId) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
-        FetchInteractionSecurity security = new FetchInteractionSecurity(token);
-        FetchInteractionResponse response = call(() -> go.interactions()
-                .fetch(new FetchInteractionRequest(instanceId), security));
+        FetchInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
+                .fetch(new FetchInteractionRequest(instanceId), new FetchInteractionSecurity(token))));
         FetchInteractionResponseBody oneOf = response.oneOf().orElse(null);
         if (oneOf == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
@@ -191,18 +183,14 @@ public class GoSdkClient implements GoClient {
         Optional<ResponseBody1> full = oneOf.responseBody1();
         if (full.isPresent()) {
             ResponseBody1 body = full.get();
-            List<String> outstanding = body.outstanding().orElse(null);
-            if (outstanding != null) {
-                lastOutstandingByInstance.put(instanceId, outstanding);
-            }
-            List<String> instructions = body.instructions().orElse(null);
-            if (instructions != null) {
-                lastInstructionsByInstance.put(instanceId, instructions);
-            }
+            // Always overwritten, empty when Go omits the field: keeping the
+            // last non-null value let a stale Side2Required outlive the
+            // document screen and route the selfie into side2Image.
+            List<String> outstanding = body.outstanding().orElse(List.of());
+            lastOutstandingByInstance.put(instanceId, outstanding);
+            lastInstructionsByInstance.put(instanceId, body.instructions().orElse(List.of()));
             List<String> collectable = SdkInteractionMapper.collectableRefs(body);
-            lastCollectableByInstance.put(instanceId, collectable.isEmpty()
-                    ? (outstanding == null ? List.of() : outstanding)
-                    : collectable);
+            lastCollectableByInstance.put(instanceId, collectable.isEmpty() ? outstanding : collectable);
             Interaction interaction = mapper.toInteraction(body, completedStages(instanceId));
             return new SubmitInteractionResponseAlias(statusFrom(interaction), interaction);
         }
@@ -235,11 +223,10 @@ public class GoSdkClient implements GoClient {
         String submittedStage = mapper.stageFor(payload.keySet(), completedStages(instanceId));
         log.debug("Submitting to Go: instance={} stage={} keys={}", instanceId, submittedStage, payload.keySet());
 
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
         SubmitInteractionRequest request = mapper.toSubmitRequest(instanceId, interactionId, payload, appConfig.consentUrl());
-        SubmitInteractionSecurity security = new SubmitInteractionSecurity(token);
-        call(() -> go.interactions().submit(request, security));
+        SubmitInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
+                .submit(request, new SubmitInteractionSecurity(token))), mapper.fieldsByGoPath(payload));
+        throwIfSubmitError(response);
 
         if (submittedStage != null) {
             completedStagesByInstance
@@ -292,17 +279,27 @@ public class GoSdkClient implements GoClient {
     }
 
     private GoState fetchGoState(String instanceId) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
-        GetJourneyStateResponse response = call(() -> go.journeys().getState(new GetJourneyStateRequest(instanceId)));
-        GetJourneyStateResponseBody body = response.object().orElse(null);
-        if (body == null) {
-            throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
+        try {
+            GetJourneyStateResponse response = call(() -> authorized(token -> currentGoClient(token).journeys()
+                    .getState(new GetJourneyStateRequest(instanceId))));
+            GetJourneyStateResponseBody body = response.object().orElse(null);
+            if (body == null) {
+                throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
+            }
+            Map<String, Object> rawStateBody = rawStateHttpClient.takeLastStateFetchBody()
+                    .map(this::parseRawStateBody)
+                    .orElse(Map.of());
+            return new GoState(body, rawStateBody);
+        } finally {
+            // takeLastStateFetchBody() already clears on the success path above;
+            // this is the failure path's clear — call() throwing (or body being
+            // null) skips straight past it otherwise, leaving the captured bytes
+            // pinned to this pooled thread's RawStateBodyCapturingHttpClient
+            // ThreadLocal until some later call on the same thread happens to
+            // overwrite or read it. A second read here is a safe no-op once the
+            // success path has already cleared it.
+            rawStateHttpClient.takeLastStateFetchBody();
         }
-        Map<String, Object> rawStateBody = rawStateHttpClient.takeLastStateFetchBody()
-                .map(this::parseRawStateBody)
-                .orElse(Map.of());
-        return new GoState(body, rawStateBody);
     }
 
     @SuppressWarnings("unchecked")
@@ -326,10 +323,18 @@ public class GoSdkClient implements GoClient {
         Object ref = data == null ? null : data.get("attachmentRef");
         if (ref == null) return data;
 
-        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, null);
-        if (outstanding == null) {
-            outstanding = fetchOutstanding(instanceId);
+        if (!lastOutstandingByInstance.containsKey(instanceId)) {
+            // Cache miss: fetchInteractionInternal() populates all three
+            // caches this method reads (outstanding, instructions,
+            // collectable) from one fetch — the same call every other read
+            // of this instance already goes through. Previously this used a
+            // narrower one-off fetch (fetchOutstanding, since removed) that
+            // only ever populated `outstanding`, silently leaving
+            // instructions/collectable empty on a cold cache for the very
+            // checks right below that read them.
+            fetchInteractionInternal(instanceId);
         }
+        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
 
         if (lastInstructionsByInstance.getOrDefault(instanceId, List.of()).stream()
                         .anyMatch("Side2Required"::equalsIgnoreCase)
@@ -356,18 +361,6 @@ public class GoSdkClient implements GoClient {
         return rewritten;
     }
 
-    private List<String> fetchOutstanding(String instanceId) {
-        String token = authService.accessToken();
-        Go go = currentGoClient(token);
-        FetchInteractionSecurity security = new FetchInteractionSecurity(token);
-        FetchInteractionResponse response = call(() -> go.interactions()
-                .fetch(new FetchInteractionRequest(instanceId), security));
-        return response.oneOf()
-                .flatMap(FetchInteractionResponseBody::responseBody1)
-                .map(b -> b.outstanding().orElse(List.of()))
-                .orElse(List.of());
-    }
-
     private static JourneyStatus statusFrom(Interaction interaction) {
         return switch (interaction.kind()) {
             case PROCESSING -> JourneyStatus.IN_PROGRESS;
@@ -385,11 +378,49 @@ public class GoSdkClient implements GoClient {
      * actually throws on 4XX/5XX (FINDINGS.md Q1; {@code GoException} is its
      * abstract base, {@code APIException} the concrete class).
      */
+    /**
+     * Runs {@code request} with the current access token, retrying once with a
+     * freshly minted one if Go answers 401/403. Without the retry, a token Go
+     * has stopped accepting (revoked, rotated early, clock skew) stays cached
+     * and every call fails until its expiry — up to an hour under
+     * client_credentials. Anything else — including a second rejection —
+     * propagates for {@link #call} to classify.
+     */
+    <T> T authorized(Function<String, T> request) {
+        String token = authService.accessToken();
+        try {
+            return request.apply(token);
+        } catch (APIException e) {
+            if (e.code() != 401 && e.code() != 403) {
+                throw e;
+            }
+            log.warn("GBG Go rejected the access token ({}); minting a new one and retrying once", e.code());
+            authService.invalidate(token);
+        }
+        return request.apply(authService.accessToken());
+    }
+
     <T> T call(Supplier<T> request) {
+        return call(request, Map.of());
+    }
+
+    /**
+     * @param fieldsByGoPath for a submit, where each submitted field landed in
+     *                       the request (see {@link SdkInteractionMapper#fieldsByGoPath}),
+     *                       so a 400/422 can name the fields Go rejected.
+     */
+    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath) {
         try {
             return request.get();
         } catch (APIException e) {
-            log.warn("GBG Go call failed: {} {}", e.code(), e.bodyAsString().orElse(""));
+            String body = e.bodyAsString().orElse("");
+            log.warn("GBG Go call failed: {} {}", e.code(), body);
+            if ((e.code() == 400 || e.code() == 422) && !fieldsByGoPath.isEmpty()) {
+                Map<String, String> fields = rejectedFields(goProblems(body), fieldsByGoPath);
+                if (!fields.isEmpty()) {
+                    throw OnboardingException.validationFailed("Some of the details you entered could not be verified.", fields);
+                }
+            }
             throw classifyCode(e.code());
         } catch (OnboardingException e) {
             throw e;
@@ -409,6 +440,61 @@ public class GoSdkClient implements GoClient {
         log.warn("GBG Go fetch-interaction returned an in-band error: {} {} {}",
                 error.status(), error.code(), error.message());
         return classifyCode((int) error.code());
+    }
+
+    /**
+     * {@code SubmitInteractionResponseBody} carries the same kind of in-band
+     * error on an otherwise-200 submit response — previously discarded
+     * entirely, which let a rejected submission (e.g. a stale interactionId)
+     * be marked completed and reported to the caller as a success anyway.
+     */
+    private OnboardingException classifyInBandError(SubmitInteractionError error) {
+        log.warn("GBG Go submit-interaction returned an in-band error: {} {} {}",
+                error.status(), error.code(), error.message());
+        return classifyCode((int) error.code());
+    }
+
+    /**
+     * Package-private so {@code GoSdkClientSubmitInteractionErrorTest} can
+     * exercise it directly against a hand-built {@link SubmitInteractionResponse},
+     * the same way {@link #call} is tested without a live Go call.
+     */
+    void throwIfSubmitError(SubmitInteractionResponse response) {
+        if (response.oneOf().orElse(null) instanceof SubmitInteractionError error) {
+            throw classifyInBandError(error);
+        }
+    }
+
+    /** Every {@code errors[].problem} in a Go error body, joined with "; " — empty if it isn't that shape. */
+    static String goProblems(String body) {
+        try {
+            List<String> problems = new java.util.ArrayList<>();
+            JSON.getMapper().readTree(body).path("errors").forEach(error -> {
+                String problem = error.path("problem").asText("");
+                if (!problem.isBlank()) problems.add(problem);
+            });
+            return String.join("; ", problems);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * Submitted field → Go's message, for every {@code path: message} segment
+     * in {@code problems} whose path is one this submit sent (live format,
+     * 2026-09-29: {@code context.subject.identity.emails.0.email: Invalid email address}).
+     */
+    static Map<String, String> rejectedFields(String problems, Map<String, String> fieldsByGoPath) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String segment : problems.split(";\\s*")) {
+            int colon = segment.indexOf(": ");
+            if (colon <= 0) continue;
+            String field = fieldsByGoPath.get(segment.substring(0, colon).trim());
+            if (field != null) {
+                fields.putIfAbsent(field, segment.substring(colon + 2).trim());
+            }
+        }
+        return fields;
     }
 
     private static OnboardingException classifyCode(int code) {

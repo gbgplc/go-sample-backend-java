@@ -30,7 +30,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 /**
  * Real GBG Go v2 integration. Every path here corresponds to a documented
@@ -154,9 +154,9 @@ public class GoApiClient implements GoClient {
 
     @Override
     public GoStartResult startJourney(String resourceId, Map<String, Object> prefill, String scenarioHint) {
-        GoStartResponse started = call(() -> client.post()
+        GoStartResponse started = call(token -> client.post()
                 .uri("journey/start")
-                .header("Authorization", "Bearer " + tokenService.accessToken())
+                .header("Authorization", "Bearer " + token)
                 .body(GoStartRequest.of(resourceId, prefill))
                 .retrieve()
                 .body(GoStartResponse.class));
@@ -169,21 +169,20 @@ public class GoApiClient implements GoClient {
 
     @Override
     public SubmitInteractionResponse fetchInteraction(String instanceId) {
-        GoInteractionFetchResponse response = call(() -> client.post()
+        GoInteractionFetchResponse response = call(token -> client.post()
                 .uri("journey/interaction/fetch")
-                .header("Authorization", "Bearer " + tokenService.accessToken())
+                .header("Authorization", "Bearer " + token)
                 .body(new GoInstanceRequest(instanceId))
                 .retrieve()
                 .body(GoInteractionFetchResponse.class));
         if (response == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
         }
-        if (response.outstanding() != null) {
-            lastOutstandingByInstance.put(instanceId, response.outstanding());
-        }
-        if (response.instructions() != null) {
-            lastInstructionsByInstance.put(instanceId, response.instructions());
-        }
+        // Always overwritten, empty when Go omits the field: keeping the last
+        // non-null value let a stale Side2Required outlive the document
+        // screen and route the selfie into documents[0].side2Image.
+        lastOutstandingByInstance.put(instanceId, response.outstanding() == null ? List.of() : response.outstanding());
+        lastInstructionsByInstance.put(instanceId, response.instructions() == null ? List.of() : response.instructions());
         // Same precedence as toInteraction below: collects when the
         // interaction carries any, otherwise raw outstanding.
         List<String> collectable = response.collects().stream()
@@ -215,12 +214,12 @@ public class GoApiClient implements GoClient {
         // customer's details in the log. This is what identified a front end
         // resubmitting an earlier screen's fields alongside the current one.
         log.debug("Submitting to Go: instance={} stage={} keys={}", instanceId, submittedStage, payload.keySet());
-        call(() -> client.post()
+        call(token -> client.post()
                 .uri("journey/interaction/submit")
-                .header("Authorization", "Bearer " + tokenService.accessToken())
+                .header("Authorization", "Bearer " + token)
                 .body(GoInteractionSubmitRequest.of(instanceId, interactionId, payload, appConfig.consentUrl()))
                 .retrieve()
-                .toBodilessEntity());
+                .toBodilessEntity(), GoInteractionSubmitRequest.fieldsByGoPath(payload));
         if (submittedStage != null) {
             completedStagesByInstance
                     .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new java.util.LinkedHashSet<>()))
@@ -273,9 +272,9 @@ public class GoApiClient implements GoClient {
     }
 
     private GoStateResponse fetchGoState(String instanceId) {
-        GoStateResponse response = call(() -> client.post()
+        GoStateResponse response = call(token -> client.post()
                 .uri("journey/state/fetch")
-                .header("Authorization", "Bearer " + tokenService.accessToken())
+                .header("Authorization", "Bearer " + token)
                 .body(new GoInstanceRequest(instanceId))
                 .retrieve()
                 .body(GoStateResponse.class));
@@ -317,9 +316,13 @@ public class GoApiClient implements GoClient {
         Object ref = data == null ? null : data.get("attachmentRef");
         if (ref == null) return data;
 
-        List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, null);
+        List<String> outstanding = lastOutstandingByInstance.get(instanceId);
         if (outstanding == null) {
-            outstanding = fetchOutstanding(instanceId);
+            // Nothing cached (e.g. just after a restart): a full fetch fills
+            // the outstanding, instructions and collectable caches together,
+            // since all three are read below.
+            fetchInteraction(instanceId);
+            outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
         }
 
         // Which capture this is, from the stage the customer is actually on.
@@ -368,16 +371,6 @@ public class GoApiClient implements GoClient {
         return rewritten;
     }
 
-    private List<String> fetchOutstanding(String instanceId) {
-        GoInteractionFetchResponse response = call(() -> client.post()
-                .uri("journey/interaction/fetch")
-                .header("Authorization", "Bearer " + tokenService.accessToken())
-                .body(new GoInstanceRequest(instanceId))
-                .retrieve()
-                .body(GoInteractionFetchResponse.class));
-        return response == null || response.outstanding() == null ? List.of() : response.outstanding();
-    }
-
     private static JourneyStatus statusFrom(Interaction interaction) {
         return switch (interaction.kind()) {
             case PROCESSING -> JourneyStatus.IN_PROGRESS;
@@ -388,9 +381,37 @@ public class GoApiClient implements GoClient {
         };
     }
 
-    private <T> T call(Supplier<T> request) {
+    private <T> T call(Function<String, T> request) {
+        return call(request, Map.of());
+    }
+
+    /**
+     * Runs {@code request} with the current access token and translates Go's
+     * failures into this service's own envelope.
+     *
+     * A 401/403 is retried once with a freshly minted token: without that, a
+     * token Go has stopped accepting (revoked, rotated early, clock skew)
+     * stays cached and every call fails until its expiry — up to an hour
+     * under client_credentials.
+     *
+     * @param fieldsByGoPath for a submit, where each submitted field landed in
+     *                       the request (see {@link GoInteractionSubmitRequest#fieldsByGoPath}),
+     *                       so a 400/422 can name the fields Go rejected.
+     */
+    private <T> T call(Function<String, T> request, Map<String, String> fieldsByGoPath) {
         try {
-            return request.get();
+            String token = tokenService.accessToken();
+            try {
+                return request.apply(token);
+            } catch (RestClientResponseException e) {
+                int status = e.getStatusCode().value();
+                if (status != 401 && status != 403) {
+                    throw e;
+                }
+                log.warn("GBG Go rejected the access token ({}); minting a new one and retrying once", status);
+                tokenService.invalidate(token);
+                return request.apply(tokenService.accessToken());
+            }
         } catch (RestClientResponseException e) {
             HttpStatusCode statusCode = e.getStatusCode();
             String goDetail = describeGoError(e);
@@ -399,7 +420,9 @@ public class GoApiClient implements GoClient {
                 throw OnboardingException.sessionExpired("Your session has ended. Start again to continue.");
             }
             if (statusCode.value() == 400 || statusCode.value() == 422) {
-                throw OnboardingException.validationFailed("Some of the details you entered could not be verified.", null);
+                Map<String, String> fields = rejectedFields(goDetail, fieldsByGoPath);
+                throw OnboardingException.validationFailed("Some of the details you entered could not be verified.",
+                        fields.isEmpty() ? null : fields);
             }
             if (statusCode.value() == 429) {
                 throw OnboardingException.rateLimited("Too many attempts. Wait a moment and try again.");
@@ -426,5 +449,27 @@ public class GoApiClient implements GoClient {
             // Body wasn't the expected shape — fall through to the raw text.
         }
         return e.getResponseBodyAsString();
+    }
+
+    /**
+     * Submitted field → Go's message, for every {@code path: message}
+     * segment in {@code goDetail} whose path is one this submit sent. Paths it
+     * didn't send (or a body that isn't in this shape) are left out, so the
+     * caller falls back to a screen-level message.
+     */
+    static Map<String, String> rejectedFields(String goDetail, Map<String, String> fieldsByGoPath) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        if (goDetail == null || fieldsByGoPath.isEmpty()) {
+            return fields;
+        }
+        for (String segment : goDetail.split(";\\s*")) {
+            int colon = segment.indexOf(": ");
+            if (colon <= 0) continue;
+            String field = fieldsByGoPath.get(segment.substring(0, colon).trim());
+            if (field != null) {
+                fields.putIfAbsent(field, segment.substring(colon + 2).trim());
+            }
+        }
+        return fields;
     }
 }

@@ -74,17 +74,31 @@ public class SessionService {
         // goClient.submitInteraction, which is exactly what the idempotency
         // check exists to prevent.
         synchronized (session) {
-            if (session.isRetryOf(interactionId, data)) {
+            // Fetched once, up front — both the retry check below (which
+            // needs the stage to tell two data-less screens apart, see
+            // Session.isRetryOf) and requireCollectedFields need the current
+            // interaction, and this is the only Go call among the two.
+            Interaction current = goClient.fetchInteraction(session.goInstanceId()).interaction();
+            String stage = current == null ? null : current.stage();
+
+            if (session.isRetryOf(interactionId, stage, data)) {
                 return session.cachedResponse();
             }
-            if (session.currentInteractionId() != null && !session.currentInteractionId().equals(interactionId)) {
+            // The session's own record when it has one, otherwise what Go
+            // says is current: with neither (no interaction at start, or a
+            // terminal submit) the check used to be skipped and any id went
+            // through to Go.
+            String expected = session.currentInteractionId() != null
+                    ? session.currentInteractionId()
+                    : current == null ? null : current.interactionId();
+            if (expected == null || !expected.equals(interactionId)) {
                 throw OnboardingException.interactionStale("This step has moved on. Refetching the current one.");
             }
 
-            requireCollectedFields(session, data);
+            requireCollectedFields(current, data);
 
             SubmitInteractionResponse response = goClient.submitInteraction(session.goInstanceId(), interactionId, data);
-            session.recordAdvance(interactionId, data, response);
+            session.recordAdvance(interactionId, stage, data, response);
             return response;
         }
     }
@@ -108,8 +122,7 @@ public class SessionService {
      * explicit true blocks, so an unknown requirement is never invented. A
      * value of whitespace alone is not an answer.
      */
-    private void requireCollectedFields(Session session, Map<String, Object> data) {
-        Interaction current = goClient.fetchInteraction(session.goInstanceId()).interaction();
+    private void requireCollectedFields(Interaction current, Map<String, Object> data) {
         if (current == null || current.collects() == null) {
             return;
         }
@@ -129,6 +142,12 @@ public class SessionService {
         return value == null || (value instanceof String text && text.isBlank());
     }
 
+    /**
+     * Deliberately not locked, unlike {@link #getInteraction}: that lock
+     * guards the per-instance capture caches an interaction fetch fills, and a
+     * state or record fetch never reads or writes them. Locking here would only
+     * queue the processing screen's once-a-second poll behind submits.
+     */
     public StateResponse getState(String sessionId, String cookieToken) {
         Session session = authorize(sessionId, cookieToken);
         return goClient.fetchState(session.goInstanceId());

@@ -24,9 +24,10 @@ app:
 # tenant was provisioned in, and set go.region to the same value.
 #
 # Running against a nonprod fabric tenant instead? It uses a Keycloak realm and
-# the password grant, so override auth-url, base-url, grant-type and scope, and
-# supply username and password alongside the client credentials. Put that in a
-# local profile or env vars rather than here â€” this file ships to customers.
+# the password grant, so override auth-url, base-url, grant-type and scope
+# here, and set GBG_USERNAME/GBG_PASSWORD alongside the client credentials --
+# both are already wired to go.username/go.password in application.yml, read
+# only under grant-type: password.
 go:
   auth-url: https://api.auth.gbgplc.com/as/token.oauth2
   base-url: https://eu.platform.go.gbgplc.com/v2/captain/

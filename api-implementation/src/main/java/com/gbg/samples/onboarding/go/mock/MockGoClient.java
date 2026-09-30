@@ -14,9 +14,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -31,7 +32,22 @@ import java.util.concurrent.atomic.AtomicLong;
 public class MockGoClient implements GoClient {
 
     private final MarketFixtures fixtures;
-    private final Map<String, MockInstance> instances = new ConcurrentHashMap<>();
+    /**
+     * Bounded and access-ordered, the same as the live clients' per-instance
+     * caches: nothing removes an instance when its session ends, so an
+     * unbounded map grows with every {@code POST /v1/sessions} for the life
+     * of the process. Past the bound the least recently used instance goes,
+     * and a session still pointing at it gets the ordinary "session ended".
+     */
+    static final int MAX_INSTANCES = 10_000;
+
+    private final Map<String, MockInstance> instances = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, MockInstance> eldest) {
+                    return size() > MAX_INSTANCES;
+                }
+            });
     private final AtomicLong counter = new AtomicLong();
 
     public MockGoClient(FixtureCatalog catalog) {
@@ -168,14 +184,16 @@ public class MockGoClient implements GoClient {
         // the target scenario's own step list (both share the prefix up to here).
         if (step.getKind() == com.gbg.samples.onboarding.api.dto.ScreenKind.CHOICE && step.getOptions() != null) {
             Object chosenValue = data == null ? null : data.get("value");
-            step.getOptions().stream()
+            // A value matching no option is a client bug, not a choice —
+            // advancing anyway would hide it behind whichever branch is default.
+            var chosen = step.getOptions().stream()
                     .filter(o -> o.getValue().equals(chosenValue))
                     .findFirst()
-                    .ifPresent(chosen -> {
-                        if (chosen.getBranchTo() != null && !chosen.getBranchTo().equals(instance.scenarioId)) {
-                            instance.scenarioId = chosen.getBranchTo();
-                        }
-                    });
+                    .orElseThrow(() -> OnboardingException.validationFailed(
+                            "Choose one of the options to continue.", null));
+            if (chosen.getBranchTo() != null && !chosen.getBranchTo().equals(instance.scenarioId)) {
+                instance.scenarioId = chosen.getBranchTo();
+            }
         }
 
         List<ScenarioStep> targetSteps = scenario(instance).getSteps();

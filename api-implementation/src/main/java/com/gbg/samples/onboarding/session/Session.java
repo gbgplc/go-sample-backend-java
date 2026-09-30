@@ -22,6 +22,8 @@ public final class Session {
 
     private volatile String currentInteractionId;
     private volatile String lastSubmittedInteractionId;
+    /** The stage of the last submit — see {@link #isRetryOf}. */
+    private volatile String lastSubmittedStage;
     /** The payload of the last submit — see {@link #isRetryOf}. */
     private volatile java.util.Map<String, Object> lastSubmittedData;
     private volatile SubmitInteractionResponse lastSubmittedResponse;
@@ -65,9 +67,10 @@ public final class Session {
     }
 
     /** Records a successful advance so a retried submit of the same step can be answered from cache. */
-    public void recordAdvance(String submittedInteractionId, java.util.Map<String, Object> submittedData,
+    public void recordAdvance(String submittedInteractionId, String submittedStage, java.util.Map<String, Object> submittedData,
                               SubmitInteractionResponse response) {
         this.lastSubmittedInteractionId = submittedInteractionId;
+        this.lastSubmittedStage = submittedStage;
         this.lastSubmittedData = submittedData;
         this.lastSubmittedResponse = response;
         this.currentInteractionId = response.interaction() == null ? null : response.interaction().interactionId();
@@ -76,28 +79,61 @@ public final class Session {
     /**
      * Whether this submit repeats the one just made.
      *
-     * The interactionId alone cannot answer that against a live Go journey.
-     * Go returns a single interaction — {@code segment1@latest} — for the whole
-     * data-collection phase, and the id stays byte-identical from the first
-     * screen to the last, so keying on it alone makes every step after the
-     * first look like a retry of the one before and replays a stale cached
-     * response instead of submitting. (Against the mock the ids differ per
-     * step, which is why this only shows up live.)
+     * Against the mock, interactionIds differ per step, so a submit whose id
+     * matches {@code lastSubmittedInteractionId} is unambiguously a retry of
+     * that exact step — comparing payload (the original approach) is enough,
+     * and by the time this runs {@code currentInteractionId} has already
+     * moved on to the next step's (different) id.
      *
-     * The stage the customer is being shown is what actually moves, so a true
-     * retry is the same interactionId <em>and</em> the same stage still
-     * standing. That keeps the double-submit protection the guard exists for
-     * while letting a real advance through.
+     * Against a live Go journey the interactionId alone can't answer it: Go
+     * returns a single interaction — {@code segment1@latest} — for the whole
+     * data-collection phase, and the id stays byte-identical from the first
+     * screen to the last, so {@code currentInteractionId} still equals
+     * {@code lastSubmittedInteractionId} after a successful advance (unlike
+     * the mock). That reused-id condition is the signal this method uses to
+     * switch to comparing {@code stage} instead: two different, data-less
+     * screens submitted back to back (e.g. an info screen then a consent
+     * screen, both posting {@code {}}) have the same interactionId
+     * <em>and</em> the same empty payload, so payload comparison alone
+     * wrongly calls the second one a retry of the first and serves it the
+     * first screen's cached response instead of forwarding it to Go — the
+     * journey silently stalls on the consent screen the customer already
+     * actioned. Stage tells them apart correctly, because it advances even
+     * when the payload doesn't.
+     *
+     * <p>Stage alone isn't enough either, so the payload must match too: the
+     * front and back of a two-sided document are two screens that
+     * deliberately share one stage ("Document", so the progress rail doesn't
+     * grow a step). Matching on stage alone called the back a retry of the
+     * front and answered it from cache without ever reaching Go, which kept
+     * asking for the back — an endless loop on that screen (live tenant,
+     * 2026-09-29).
+     *
+     * <p>Note this can't also catch an immediate duplicate resubmission of
+     * the very last live step (the two are indistinguishable once
+     * {@code currentInteractionId} has moved past the stage that was
+     * submitted — comparing a freshly-read stage back against
+     * {@code lastSubmittedStage} would always disagree after a successful
+     * advance, whether this is a genuine duplicate or the next screen).
+     * Out of scope here: this method only fixes the false positive the
+     * review reported, not live double-submit protection, which Go's own
+     * handling of a repeated {@code segment1@latest} submission would need
+     * to cover.
+     *
+     * <p>Falls back to the payload comparison whenever the reused-id
+     * condition doesn't hold, or either side has no stage (the very first
+     * submit, or a stage-less fixture).
      */
-    public boolean isRetryOf(String interactionId, java.util.Map<String, Object> data) {
+    public boolean isRetryOf(String interactionId, String stage, java.util.Map<String, Object> data) {
         if (lastSubmittedInteractionId == null || !lastSubmittedInteractionId.equals(interactionId)) {
             return false;
         }
-        // Same id and the same payload: a genuine double-submit — a
-        // double-tapped button or a retried request. Same id with different
-        // data is the next step, because Go reuses one interactionId for the
-        // whole collection phase.
-        return java.util.Objects.equals(lastSubmittedData, data);
+        boolean samePayload = java.util.Objects.equals(lastSubmittedData, data);
+        boolean interactionIdReusedAcrossStages = currentInteractionId != null && currentInteractionId.equals(interactionId);
+        if (interactionIdReusedAcrossStages && stage != null && lastSubmittedStage != null) {
+            return stage.equals(lastSubmittedStage) && samePayload;
+        }
+        return samePayload;
     }
 
     public SubmitInteractionResponse cachedResponse() {

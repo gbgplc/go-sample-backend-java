@@ -10,6 +10,7 @@ import com.gbg.samples.onboarding.api.dto.StartSessionResponse;
 import com.gbg.samples.onboarding.api.dto.StateResponse;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionRequest;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionResponse;
+import com.gbg.samples.onboarding.config.OpenApiConfig;
 import com.gbg.samples.onboarding.config.SessionProperties;
 import com.gbg.samples.onboarding.session.SessionService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -34,7 +35,6 @@ import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.time.Duration;
 
 /**
  * The REST contract from "Market onboarding applications — front-end
@@ -94,7 +94,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @GetMapping("/v1/sessions/{id}/interaction")
     public Interaction getInteraction(
             @PathVariable("id") String sessionId,
@@ -115,7 +115,7 @@ public class SessionController {
             @ApiResponse(responseCode = "422", description = "Field-level validation failure",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @PostMapping("/v1/sessions/{id}/interaction")
     public SubmitInteractionResponse submitInteraction(
             @PathVariable("id") String sessionId,
@@ -132,7 +132,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @GetMapping("/v1/sessions/{id}/state")
     public StateResponse getState(
             @PathVariable("id") String sessionId,
@@ -148,7 +148,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @GetMapping("/v1/sessions/{id}/record")
     public RecordResponse getRecord(
             @PathVariable("id") String sessionId,
@@ -165,7 +165,7 @@ public class SessionController {
             @ApiResponse(responseCode = "410", description = "Session missing, expired, or cookie mismatch",
                     content = @Content(schema = @Schema(implementation = ErrorEnvelope.class)))
     })
-    @SecurityRequirement(name = "onboarding_session")
+    @SecurityRequirement(name = OpenApiConfig.SESSION_SCHEME)
     @PostMapping("/v1/sessions/{id}/attachments")
     public AttachmentResponse uploadAttachment(
             @PathVariable("id") String sessionId,
@@ -196,6 +196,11 @@ public class SessionController {
      * plain HTTP is silently dropped by curl, PowerShell, and most other
      * HTTP clients — found by testing this directly, not by inspection.
      * Behind real HTTPS in any other environment this is still `Secure`.
+     *
+     * <p>No {@code Max-Age}: a browser-session cookie, with expiry left to the
+     * server-side TTL, which slides on every call. A fixed Max-Age set at
+     * start ran out 30 minutes later however active the customer was, and
+     * they got "session ended" while their session was still alive.
      */
     private void setSessionCookie(HttpServletResponse response, String token, boolean secure) {
         ResponseCookie cookie = ResponseCookie.from(sessionProperties.cookieName(), token)
@@ -203,7 +208,6 @@ public class SessionController {
                 .secure(secure)
                 .sameSite("Lax")
                 .path("/v1/sessions")
-                .maxAge(Duration.ofMinutes(sessionProperties.ttlMinutes()))
                 .build();
         response.addHeader("Set-Cookie", cookie.toString());
     }

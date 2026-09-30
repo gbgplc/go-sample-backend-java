@@ -63,13 +63,39 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
         }
 
         data.forEach((key, value) -> {
-            if (CONSENT_KEYS.contains(key)) return;
+            // A null would otherwise go out as the string "null" (e.g.
+            // email:"null", which Go rejects).
+            if (CONSENT_KEYS.contains(key) || value == null) return;
             FieldMapping mapping = FieldMapping.forKey(key);
             participants.add(new Participant(mapping.domainElementId()));
             mapping.place(subject, value);
         });
 
         return new GoInteractionSubmitRequest(instanceId, interactionId, participants, new Context(subject));
+    }
+
+    /**
+     * Go path → submitted field name, for the same {@code data} {@link #of}
+     * would send.
+     *
+     * Go reports a rejected submit as one error whose {@code problem} names
+     * each failing value by its path in the request, e.g.
+     * {@code context.subject.identity.emails.0.email: Invalid email address}
+     * (live tenant, 2026-09-29). Array indices depend on the order the fields
+     * were placed, so the only reliable way back to the field the customer
+     * typed into is to run the same placement and record where each one went.
+     */
+    public static Map<String, String> fieldsByGoPath(Map<String, Object> data) {
+        Map<String, String> byPath = new LinkedHashMap<>();
+        if (data == null) {
+            return byPath;
+        }
+        Map<String, Object> subject = new LinkedHashMap<>();
+        data.forEach((key, value) -> {
+            if (CONSENT_KEYS.contains(key) || value == null) return;
+            byPath.put(FieldMapping.forKey(key).place(subject, value), key);
+        });
+        return byPath;
     }
 
     /**
@@ -297,42 +323,76 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
             return mapped != null ? mapped : trimmed;
         }
 
+        /**
+         * Places {@code value} under {@code subject} and returns the path Go
+         * would name it by in a validation error, e.g.
+         * {@code context.subject.identity.emails.0.email}.
+         */
         @SuppressWarnings("unchecked")
-        void place(Map<String, Object> subject, Object value) {
+        String place(Map<String, Object> subject, Object value) {
             Map<String, Object> cursor = subject;
             for (int i = 0; i < path.length - 1; i++) {
                 cursor = (Map<String, Object>) cursor.computeIfAbsent(path[i], k -> new LinkedHashMap<String, Object>());
             }
             String leaf = path[path.length - 1];
+            String at = "context.subject." + String.join(".", path);
             String text = String.valueOf(value);
-            switch (wrap) {
-                case PHONE -> cursor.put(leaf, List.of(Map.of("type", "mobile", "number", text)));
+            return switch (wrap) {
+                case PHONE -> {
+                    cursor.put(leaf, List.of(Map.of("type", "mobile", "number", text)));
+                    yield at + ".0.number";
+                }
                 // Appended, not put: a journey collecting both a personal and a
                 // work email sends them as separate fields on one screen, and
                 // the second would otherwise replace the first in emails[].
-                case PHONE_MOBILE -> append(cursor, leaf, Map.of("type", "mobile", "number", text));
-                case PHONE_LANDLINE -> append(cursor, leaf, Map.of("type", "landline", "number", text));
-                case EMAIL_PERSONAL -> append(cursor, leaf, Map.of("type", "personal", "email", text));
-                case EMAIL_WORK -> append(cursor, leaf, Map.of("type", "work", "email", text));
-                case ID_NUMBER -> append(cursor, leaf,
-                        Map.of("type", "NationalInsuranceNumber", "idNumber", text));
-                case SSN -> append(cursor, leaf, Map.of("type", "SSN", "idNumber", text));
-                case PREVIOUS_ADDRESS -> append(cursor, leaf, Map.of("addressString", text));
+                case PHONE_MOBILE -> at + "." + append(cursor, leaf, Map.of("type", "mobile", "number", text)) + ".number";
+                case PHONE_LANDLINE -> at + "." + append(cursor, leaf, Map.of("type", "landline", "number", text)) + ".number";
+                case EMAIL_PERSONAL -> at + "." + append(cursor, leaf, Map.of("type", "personal", "email", text)) + ".email";
+                case EMAIL_WORK -> at + "." + append(cursor, leaf, Map.of("type", "work", "email", text)) + ".email";
+                case ID_NUMBER -> at + "." + append(cursor, leaf,
+                        Map.of("type", "NationalInsuranceNumber", "idNumber", text)) + ".idNumber";
+                case SSN -> at + "." + append(cursor, leaf, Map.of("type", "SSN", "idNumber", text)) + ".idNumber";
+                case PREVIOUS_ADDRESS -> at + "." + append(cursor, leaf, Map.of("addressString", text)) + ".addressString";
                 // Both document sides belong to one entry in documents[], so a
                 // second side merges into the existing object rather than
                 // appending a second document.
-                case DOCUMENT_SIDE1 -> mergeDocument(cursor, leaf, "side1Image", text);
-                case DOCUMENT_SIDE2 -> mergeDocument(cursor, leaf, "side2Image", text);
+                case DOCUMENT_SIDE1 -> {
+                    mergeDocument(cursor, leaf, "side1Image", text);
+                    yield at + ".0.side1Image";
+                }
+                case DOCUMENT_SIDE2 -> {
+                    mergeDocument(cursor, leaf, "side2Image", text);
+                    yield at + ".0.side2Image";
+                }
                 // `type` is required alongside the image: the Liveness
                 // Verification module's own reference lists it as such, and
                 // without it Go accepts the submission but leaves
                 // Selfie/selfieImage outstanding — a silent no-op rather than
                 // an error. The general submit example in the API docs omits
                 // it, which is what makes this one easy to miss.
-                case SELFIE -> cursor.put(leaf, List.of(
-                        new LinkedHashMap<>(Map.of("type", "Selfie", "selfieImage", text))));
-                case NONE -> cursor.put(leaf, "country".equals(leaf) ? countryCode(text) : value);
+                case SELFIE -> {
+                    cursor.put(leaf, List.of(new LinkedHashMap<>(Map.of("type", "Selfie", "selfieImage", text))));
+                    yield at + ".0.selfieImage";
+                }
+                case NONE -> {
+                    cursor.put(leaf, "country".equals(leaf) ? countryCode(text) : value);
+                    yield at;
+                }
+            };
+        }
+
+        /** Adds one entry to a typed array under {@code leaf}, creating it if absent; returns its index. */
+        @SuppressWarnings("unchecked")
+        private static int append(Map<String, Object> cursor, String leaf, Map<String, String> entry) {
+            Object existing = cursor.get(leaf);
+            List<Object> entries = existing instanceof List<?> list
+                    ? (List<Object>) list
+                    : new java.util.ArrayList<>();
+            if (!(existing instanceof List<?>)) {
+                cursor.put(leaf, entries);
             }
+            entries.add(new LinkedHashMap<>(entry));
+            return entries.size() - 1;
         }
 
         /**
@@ -348,18 +408,6 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
          * document, but the live platform does not accept it.
          */
         @SuppressWarnings("unchecked")
-        /** Adds one entry to a typed array under {@code leaf}, creating it if absent. */
-        private static void append(Map<String, Object> cursor, String leaf, Map<String, String> entry) {
-            Object existing = cursor.get(leaf);
-            List<Object> entries = existing instanceof List<?> list
-                    ? (List<Object>) list
-                    : new java.util.ArrayList<>();
-            if (!(existing instanceof List<?>)) {
-                cursor.put(leaf, entries);
-            }
-            entries.add(new LinkedHashMap<>(entry));
-        }
-
         private static void mergeDocument(Map<String, Object> cursor, String leaf, String side, String image) {
             List<Map<String, Object>> documents = (List<Map<String, Object>>) cursor.get(leaf);
             Map<String, Object> document;

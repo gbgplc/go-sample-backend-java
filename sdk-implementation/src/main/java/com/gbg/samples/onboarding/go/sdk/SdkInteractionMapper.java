@@ -16,6 +16,7 @@ import com.gbg.gocore.models.operations.StartJourneySubject;
 import com.gbg.gocore.models.operations.SubmitInteractionBiometric4;
 import com.gbg.gocore.models.operations.SubmitInteractionBiometricUnion;
 import com.gbg.gocore.models.operations.SubmitInteractionConsent;
+import com.gbg.gocore.models.operations.SubmitInteractionConsentType;
 import com.gbg.gocore.models.operations.SubmitInteractionContext;
 import com.gbg.gocore.models.operations.SubmitInteractionDocument;
 import com.gbg.gocore.models.operations.SubmitInteractionIdentity;
@@ -247,6 +248,12 @@ public class SdkInteractionMapper {
             // which could sometimes short-circuit straight to a RESULT screen
             // from the interaction fetch itself — see this module's README,
             // "Known gaps".
+            return processingInteraction(interactionId);
+        }
+        // Paused (e.g. awaiting a manual review): Go won't accept input, so
+        // picking a screen from `outstanding` would show a form it rejects.
+        // Same rule as DefaultInteractionMapper.
+        if (status == JourneyStatus.IN_PROGRESS) {
             return processingInteraction(interactionId);
         }
 
@@ -959,8 +966,12 @@ public class SdkInteractionMapper {
         }
 
         data.forEach((key, value) -> {
-            if (CONSENT_KEYS.contains(key)) return;
+            // A null would otherwise go out as the string "null" (e.g.
+            // email:"null" → Go 400), and a dropped key still declared as a
+            // participant makes Go expect data it never receives.
+            if (CONSENT_KEYS.contains(key) || value == null) return;
             FieldMapping mapping = FieldMapping.forKey(key);
+            if (mapping.target() == FieldMapping.Target.DROPPED) return;
             participants.add(new Participant(mapping.domainElementId, null));
             mapping.apply(identity, documents, biometrics, value);
         });
@@ -983,12 +994,38 @@ public class SdkInteractionMapper {
                 new SubmitInteractionContext(subjectBuilder.build()));
     }
 
+    /**
+     * Go path → submitted field name, for the same {@code data}
+     * {@link #toSubmitRequest} would send — so a 400/422 whose problems name
+     * paths ({@code context.subject.identity.emails.0.email: Invalid email address})
+     * can be mapped back to the fields the customer typed into. Array indices
+     * depend on placement order, so this runs the same placement.
+     */
+    public Map<String, String> fieldsByGoPath(Map<String, Object> data) {
+        Map<String, String> byPath = new LinkedHashMap<>();
+        if (data == null) {
+            return byPath;
+        }
+        IdentityAccumulator identity = new IdentityAccumulator();
+        List<SubmitInteractionDocument> documents = new ArrayList<>();
+        List<SubmitInteractionBiometricUnion> biometrics = new ArrayList<>();
+        data.forEach((key, value) -> {
+            if (CONSENT_KEYS.contains(key) || value == null) return;
+            String path = FieldMapping.forKey(key).apply(identity, documents, biometrics, value);
+            if (path != null) {
+                byPath.put(path, key);
+            }
+        });
+        return byPath;
+    }
+
     private static SubmitInteractionConsent consentRecord(Map<String, Object> data, String consentUrl) {
         String purpose = CONSENT_KEYS.stream()
                 .filter(k -> Boolean.TRUE.equals(data.get(k)))
                 .reduce((a, b) -> a + "," + b)
                 .orElse("");
         return SubmitInteractionConsent.builder()
+                .type(SubmitInteractionConsentType.EXPLICIT)
                 .url(consentUrl)
                 .terms("I agree that Meridian Health may access and share my patient record "
                         + "with clinicians treating me.")
@@ -1141,38 +1178,73 @@ public class SdkInteractionMapper {
             return new FieldMapping(key, Target.DROPPED, null);
         }
 
-        void apply(IdentityAccumulator identity, List<SubmitInteractionDocument> documents,
-                   List<SubmitInteractionBiometricUnion> biometrics, Object value) {
+        /**
+         * Places {@code value} and returns the path Go would name it by in a
+         * validation error (e.g. {@code context.subject.identity.emails.0.email}),
+         * or null for a dropped key.
+         */
+        String apply(IdentityAccumulator identity, List<SubmitInteractionDocument> documents,
+                     List<SubmitInteractionBiometricUnion> biometrics, Object value) {
             String text = String.valueOf(value);
+            String id = "context.subject.identity.";
             switch (target) {
-                case FIRST_NAME -> identity.firstName = text;
-                case LAST_NAMES -> identity.lastNames = text;
-                case DATE_OF_BIRTH -> identity.dateOfBirth = text;
-                case GENDER -> identity.gender = text;
-                case MOTHERS_MAIDEN_NAME -> identity.mothersMaidenName = text;
-                case ADDRESS_COMPONENT -> identity.addressComponents.put(addressComponent, text);
-                case PHONE_MOBILE -> identity.phones.add(new SubmitInteractionIdentityPhone("mobile", text));
-                case PHONE_LANDLINE -> identity.phones.add(new SubmitInteractionIdentityPhone("landline", text));
-                case EMAIL_PERSONAL -> identity.emails.add(new SubmitInteractionIdentityEmail("personal", text));
-                case EMAIL_WORK -> identity.emails.add(new SubmitInteractionIdentityEmail("work", text));
-                case ID_NUMBER_NI -> identity.idNumbers.add(
-                        new SubmitInteractionIdentityIdNumber("NationalInsuranceNumber", text, null));
-                case ID_NUMBER_SSN -> identity.idNumbers.add(
-                        new SubmitInteractionIdentityIdNumber("SSN", text, null));
-                case PREVIOUS_ADDRESS -> identity.previousAddresses.add(
-                        SubmitInteractionIdentityPreviousAddress.builder().addressString(text).build());
-                case DOCUMENT_SIDE1 -> mergeDocument(documents, true, text);
-                case DOCUMENT_SIDE2 -> mergeDocument(documents, false, text);
-                case SELFIE -> biometrics.add(SubmitInteractionBiometricUnion.of(
-                        // See this module's README "Known gaps": SubmitInteractionBiometric1's
-                        // face1Image/face2Image both being @Nonnull rules it out for a flow that
-                        // only ever captures one selfie image — Biometric4's single, required
-                        // `selfieImage` field is the closest structural match (same field name as
-                        // today's raw shape, no second image this client doesn't have). Unverified
-                        // against a live journey's actual `collects` discriminator.
-                        new SubmitInteractionBiometric4(text)));
-                case DROPPED -> { /* logged in forKey() */ }
+                case FIRST_NAME -> { identity.firstName = text; return id + "firstName"; }
+                case LAST_NAMES -> { identity.lastNames = text; return id + "lastNames.0"; }
+                case DATE_OF_BIRTH -> { identity.dateOfBirth = text; return id + "dateOfBirth"; }
+                case GENDER -> { identity.gender = text; return id + "gender"; }
+                case MOTHERS_MAIDEN_NAME -> { identity.mothersMaidenName = text; return id + "mothersMaidenName"; }
+                case ADDRESS_COMPONENT -> {
+                    identity.addressComponents.put(addressComponent, text);
+                    return id + "currentAddress." + addressComponent;
+                }
+                case PHONE_MOBILE -> {
+                    identity.phones.add(new SubmitInteractionIdentityPhone("mobile", text));
+                    return id + "phones." + (identity.phones.size() - 1) + ".number";
+                }
+                case PHONE_LANDLINE -> {
+                    identity.phones.add(new SubmitInteractionIdentityPhone("landline", text));
+                    return id + "phones." + (identity.phones.size() - 1) + ".number";
+                }
+                case EMAIL_PERSONAL -> {
+                    identity.emails.add(new SubmitInteractionIdentityEmail("personal", text));
+                    return id + "emails." + (identity.emails.size() - 1) + ".email";
+                }
+                case EMAIL_WORK -> {
+                    identity.emails.add(new SubmitInteractionIdentityEmail("work", text));
+                    return id + "emails." + (identity.emails.size() - 1) + ".email";
+                }
+                case ID_NUMBER_NI -> {
+                    identity.idNumbers.add(new SubmitInteractionIdentityIdNumber("NationalInsuranceNumber", text, null));
+                    return id + "idNumbers." + (identity.idNumbers.size() - 1) + ".idNumber";
+                }
+                case ID_NUMBER_SSN -> {
+                    identity.idNumbers.add(new SubmitInteractionIdentityIdNumber("SSN", text, null));
+                    return id + "idNumbers." + (identity.idNumbers.size() - 1) + ".idNumber";
+                }
+                case PREVIOUS_ADDRESS -> {
+                    identity.previousAddresses.add(
+                            SubmitInteractionIdentityPreviousAddress.builder().addressString(text).build());
+                    return id + "previousAddresses." + (identity.previousAddresses.size() - 1) + ".addressString";
+                }
+                case DOCUMENT_SIDE1 -> { mergeDocument(documents, true, text); return "context.subject.documents.0.side1Image"; }
+                case DOCUMENT_SIDE2 -> { mergeDocument(documents, false, text); return "context.subject.documents.0.side2Image"; }
+                case SELFIE -> { biometrics.add(SubmitInteractionBiometricUnion.of(
+                        // SubmitInteractionBiometric1's face1Image/face2Image both being @Nonnull
+                        // rules it out for a flow that only ever captures one selfie image —
+                        // Biometric4's single, required `selfieImage` field is the structural
+                        // match (same field name as the old raw-HTTP shape, no second image this
+                        // client doesn't have). Confirmed live 2026-09-18 (Meridian Health,
+                        // public platform): the submit call accepted this shape without error and
+                        // the journey progressed to a real decision — a schema mismatch here would
+                        // have surfaced as an immediate 400 on the submit itself, not later.
+                        // type "Selfie" as well, matching the raw-HTTP shape: Liveness
+                        // Verification's reference lists it as required alongside the image.
+                        new SubmitInteractionBiometric4(null, "Selfie", text, null)));
+                    return "context.subject.biometrics." + (biometrics.size() - 1) + ".selfieImage";
+                }
+                case DROPPED -> { return null; /* logged in forKey() */ }
             }
+            return null;
         }
     }
 

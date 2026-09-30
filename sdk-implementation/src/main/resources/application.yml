@@ -6,6 +6,22 @@ spring:
     name: onboarding-service
   jackson:
     default-property-inclusion: non_null
+  # Applies to every auto-configured RestClient.Builder in this module (none
+  # currently use one directly, but this keeps parity with api-implementation
+  # and covers any future one). The SDK's own HTTP timeout is set separately
+  # — see TimeoutHttpClient.
+  http:
+    client:
+      connect-timeout: 5s
+      read-timeout: 15s
+  servlet:
+    multipart:
+      # Boot's own default (1MB) rejects a typical phone photo of a document
+      # or selfie outright — MaxUploadSizeExceededException, mapped by
+      # GlobalExceptionHandler to 413 PAYLOAD_TOO_LARGE. 10MB covers a
+      # realistic capture without inviting an oversized upload.
+      max-file-size: 10MB
+      max-request-size: 10MB
 
 app:
   market: northbank
@@ -18,6 +34,15 @@ go:
   # Only read when go.mode=live — never commit real values, set via env vars.
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
+  # Password grant only (the nonprod fabric tenants) — ignored under
+  # client_credentials. Every market's own application-<market>.yml
+  # previously documented these two env vars (.env.example, run.sh) without
+  # actually binding them anywhere, so setting them had no effect and
+  # password-grant token minting failed silently. Wired here, once, so every
+  # market profile inherits it rather than repeating the same two lines four
+  # times.
+  username: ${GBG_USERNAME:}
+  password: ${GBG_PASSWORD:}
 
 session:
   ttl-minutes: 30

@@ -40,6 +40,19 @@ public class GoTokenService {
 
     private static final Logger log = LoggerFactory.getLogger(GoTokenService.class);
     private static final long REFRESH_MARGIN_SECONDS = 30;
+    /**
+     * Assumed lifetime when the token response omits {@code expires_in}: the
+     * shortest seen on these tenants (Keycloak). Without it a missing field
+     * read as 0, the token counted as expired at once, and every call minted
+     * a new one.
+     */
+    static final long DEFAULT_TTL_SECONDS = 300;
+
+    /** How long to cache a token Go says lasts {@code expiresIn} seconds (null or ≤0 if it didn't say). */
+    static long cacheSeconds(Long expiresIn) {
+        long ttl = expiresIn == null || expiresIn <= 0 ? DEFAULT_TTL_SECONDS : expiresIn;
+        return Math.max(0, ttl - REFRESH_MARGIN_SECONDS);
+    }
 
     private final RestClient authClient;
     private final GoProperties properties;
@@ -48,15 +61,71 @@ public class GoTokenService {
     private volatile Instant cachedTokenExpiresAt = Instant.EPOCH;
 
     public GoTokenService(GoProperties properties, RestClient.Builder builder) {
+        requireCredentials(properties);
         this.properties = properties;
         this.authClient = builder.build();
     }
 
-    public synchronized String accessToken() {
-        if (cachedToken != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
-            return cachedToken;
+    /**
+     * Fails startup in live mode when a credential the configured grant needs
+     * is blank, rather than starting fine and answering every customer with
+     * "Could not authenticate" at their first screen.
+     */
+    static void requireCredentials(GoProperties properties) {
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        if (isBlank(properties.clientId())) missing.add("go.client-id (GBG_CLIENT_ID)");
+        if (isBlank(properties.clientSecret())) missing.add("go.client-secret (GBG_CLIENT_SECRET)");
+        if (properties.passwordGrant()) {
+            if (isBlank(properties.username())) missing.add("go.username (GBG_USERNAME)");
+            if (isBlank(properties.password())) missing.add("go.password (GBG_PASSWORD)");
         }
-        return mintToken();
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("go.mode=live with grant-type " + properties.grantType()
+                    + " but these are not set: " + String.join(", ", missing)
+                    + ". Put them in .env.local (see .env.example) or run with go.mode=mock.");
+        }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    /**
+     * Double-checked rather than a single {@code synchronized} guarding both
+     * the cache read and the mint: with one lock around the whole method,
+     * every caller — including ones holding a perfectly valid cached token —
+     * queued behind whichever thread was minting, and a stalled auth-server
+     * response (this client has no HTTP timeout configured either — see
+     * {@code RestClient.Builder}) meant every request thread in the pool
+     * blocked on that lock indefinitely. {@code cachedToken}/
+     * {@code cachedTokenExpiresAt} are already {@code volatile}, so the fast
+     * path below is safe unsynchronized; only an actual expiry contends for
+     * the lock, and only briefly.
+     */
+    public String accessToken() {
+        String token = cachedToken;
+        if (token != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
+            return token;
+        }
+        synchronized (this) {
+            if (cachedToken != null && Instant.now().isBefore(cachedTokenExpiresAt)) {
+                return cachedToken;
+            }
+            return mintToken();
+        }
+    }
+
+    /**
+     * Drops {@code rejected} from the cache after Go answered 401/403 to it —
+     * revoked, rotated early, or clock skew — so the next {@link #accessToken}
+     * mints instead of handing the same dead token out until its expiry. A
+     * no-op if another thread has already replaced it.
+     */
+    public synchronized void invalidate(String rejected) {
+        if (rejected != null && rejected.equals(cachedToken)) {
+            cachedToken = null;
+            cachedTokenExpiresAt = Instant.EPOCH;
+        }
     }
 
     private String mintToken() {
@@ -81,7 +150,7 @@ public class GoTokenService {
                 throw OnboardingException.upstreamUnavailable("Could not authenticate with the identity platform.");
             }
             cachedToken = response.access_token();
-            cachedTokenExpiresAt = Instant.now().plusSeconds(Math.max(0, response.expires_in() - REFRESH_MARGIN_SECONDS));
+            cachedTokenExpiresAt = Instant.now().plusSeconds(cacheSeconds(response.expires_in()));
             return cachedToken;
         } catch (Exception e) {
             log.error("Failed to mint a Go access token", e);

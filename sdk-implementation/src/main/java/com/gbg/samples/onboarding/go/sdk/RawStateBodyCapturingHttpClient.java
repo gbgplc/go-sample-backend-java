@@ -2,11 +2,14 @@ package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.utils.HTTPClient;
 import com.gbg.gocore.utils.SpeakeasyHTTPClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLSession;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -33,10 +36,12 @@ import java.util.Optional;
  * "Referred" regardless of the real outcome — {@code mapDecision} was never
  * wrong, it was correctly defaulting on data that never arrived.
  *
- * <p>This wraps the SDK's own {@link SpeakeasyHTTPClient} rather than
- * replacing it — every request still goes out through the SDK (same URL
- * construction, headers, auth, hooks), and every response the SDK itself
- * still deserializes normally. Only for a {@code journey/state/fetch}
+ * <p>This wraps the SDK's own {@link SpeakeasyHTTPClient} (via
+ * {@link TimeoutHttpClient}, which also gives every request here the fixed
+ * timeout neither {@code Go} instance had before — see its own javadoc)
+ * rather than replacing it — every request still goes out through the SDK
+ * (same URL construction, headers, auth, hooks), and every response the SDK
+ * itself still deserializes normally. Only for a {@code journey/state/fetch}
  * request does this class additionally buffer the raw bytes before handing
  * an equivalent, still-fully-readable response back to the SDK, so
  * {@link GoSdkClient} can separately parse the same bytes with a plain
@@ -52,8 +57,27 @@ import java.util.Optional;
  */
 final class RawStateBodyCapturingHttpClient implements HTTPClient {
 
-    private final HTTPClient delegate = new SpeakeasyHTTPClient();
+    private static final Logger log = LoggerFactory.getLogger(RawStateBodyCapturingHttpClient.class);
+
+    /**
+     * Largest state body captured for the side parse. Generous — a decided
+     * instance's context can carry extracted document data — but bounded, so
+     * one oversized response can't be held twice in memory unchecked. Past
+     * it the SDK still gets the full body; only the raw copy is skipped, and
+     * the mapper falls back as it does for any missing raw body.
+     */
+    static final int MAX_CAPTURED_BYTES = 16 * 1024 * 1024;
+
+    private final HTTPClient delegate;
     private final ThreadLocal<byte[]> lastStateFetchBody = new ThreadLocal<>();
+
+    RawStateBodyCapturingHttpClient() {
+        this(new TimeoutHttpClient());
+    }
+
+    RawStateBodyCapturingHttpClient(HTTPClient delegate) {
+        this.delegate = delegate;
+    }
 
     @Override
     public HttpResponse<InputStream> send(HttpRequest request) throws IOException, InterruptedException, URISyntaxException {
@@ -61,9 +85,14 @@ final class RawStateBodyCapturingHttpClient implements HTTPClient {
         if (!request.uri().getPath().endsWith("/journey/state/fetch")) {
             return response;
         }
-        byte[] bytes = response.body().readAllBytes();
-        lastStateFetchBody.set(bytes);
-        return new BufferedBodyResponse(response, bytes);
+        InputStream body = response.body();
+        byte[] head = body.readNBytes(MAX_CAPTURED_BYTES + 1);
+        if (head.length > MAX_CAPTURED_BYTES) {
+            log.warn("journey/state/fetch body exceeds {} bytes; not capturing it for the raw parse", MAX_CAPTURED_BYTES);
+            return new BufferedBodyResponse(response, head, body);
+        }
+        lastStateFetchBody.set(head);
+        return new BufferedBodyResponse(response, head, null);
     }
 
     /** The bytes captured by the most recent {@code journey/state/fetch} call on this thread, if any. Clears on read. */
@@ -83,8 +112,12 @@ final class RawStateBodyCapturingHttpClient implements HTTPClient {
         return delegate.isDebugLoggingEnabled();
     }
 
-    /** Same response, replayable body — everything else delegates unchanged. */
-    private record BufferedBodyResponse(HttpResponse<InputStream> original, byte[] bytes)
+    /**
+     * Same response, body re-served from what was already read — plus the
+     * unread {@code rest} of the stream when the body was too big to capture.
+     * Everything else delegates unchanged.
+     */
+    private record BufferedBodyResponse(HttpResponse<InputStream> original, byte[] bytes, InputStream rest)
             implements HttpResponse<InputStream> {
 
         @Override
@@ -109,7 +142,8 @@ final class RawStateBodyCapturingHttpClient implements HTTPClient {
 
         @Override
         public InputStream body() {
-            return new ByteArrayInputStream(bytes);
+            InputStream head = new ByteArrayInputStream(bytes);
+            return rest == null ? head : new SequenceInputStream(head, rest);
         }
 
         @Override

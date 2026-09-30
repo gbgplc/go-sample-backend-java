@@ -91,6 +91,20 @@ class SdkInteractionMapperTest {
                 new StagePlanEntry("Biometrics", StageState.ACTIVE));
     }
 
+    /** Review finding 7: a Paused journey still lists outstanding elements but accepts no input. */
+    @Test
+    void aPausedJourneyShowsProcessingNotAnInputScreen() {
+        ResponseBody1 paused = ResponseBody1.builder()
+                .instanceId("instance-1")
+                .interactionId("int-1")
+                .journey(new Journey1(JourneyStatus1.PAUSED))
+                .interaction(new com.gbg.gocore.models.operations.Interaction(List.of(), List.of(), "gr-1"))
+                .outstanding(List.of("PrimaryDocument/side1Image"))
+                .build();
+
+        assertThat(mapper.toInteraction(paused).kind()).isEqualTo(ScreenKind.PROCESSING);
+    }
+
     @Test
     void anElementNoConfiguredStageClaimsFallsBackToAGenericFormInsteadOfStalling() {
         Interaction interaction = mapper.toInteraction(fetchResponseWithOutstanding(
@@ -474,12 +488,29 @@ class SdkInteractionMapperTest {
     }
 
     @Test
-    void aModuleWithNoResultYetFallsBackToItsOwnClassification() {
+    void aModuleWithNoResultYetAndNoClassificationDefaultsToRunning() {
         Map<String, Object> notYetRun = stepMap("Liveness Verification", null, null, null);
 
         RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.RUNNING);
+    }
+
+    /**
+     * The case the previous test's name actually claimed to cover: a step
+     * with no {@code result} object yet (so {@code mapModuleState} can't
+     * switch on a status) but a real {@code outcomeClassification} already
+     * present. Passing {@code null} for both (as the RUNNING-default test
+     * above does) never reaches the classify(outcomeClassification, ...)
+     * branch at all — this does.
+     */
+    @Test
+    void aModuleWithNoResultYetFallsBackToItsOwnClassification() {
+        Map<String, Object> notYetRun = stepMap("Liveness Verification", "positive", null, null);
+
+        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
+
+        assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
 
     // --- toRecord: journey name, reference, timestamps, total time, per-module timing and document type ---
