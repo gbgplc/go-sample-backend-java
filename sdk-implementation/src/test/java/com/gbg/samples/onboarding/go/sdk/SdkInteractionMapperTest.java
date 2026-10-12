@@ -1,10 +1,8 @@
 package com.gbg.samples.onboarding.go.sdk;
 
-import com.gbg.gocore.models.operations.GetJourneyStateResponseBody;
-import com.gbg.gocore.models.operations.GetJourneyStateStatus;
-import com.gbg.gocore.models.operations.Journey1;
-import com.gbg.gocore.models.operations.JourneyStatus1;
-import com.gbg.gocore.models.operations.ResponseBody1;
+import com.gbg.gocore.models.InteractionFetchResponse;
+import com.gbg.gocore.models.InteractionFetchResponseJourney;
+import com.gbg.gocore.models.StateFetchResponse;
 import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.ModuleState;
 import com.gbg.samples.onboarding.api.dto.RecordResponse;
@@ -31,21 +29,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>Two families of fixture</h2>
  * <ul>
- *   <li>{@code toInteraction} tests build a real {@link ResponseBody1} via
- *       its builder — this is the shape the spike fully confirmed
- *       (instanceId/interactionId/journey/interaction/instructions/outstanding
- *       all present, typed), so these fixtures are as faithful as the
- *       original raw-HTTP ones.</li>
- *   <li>{@code toRecord} tests build a {@link GetJourneyStateResponseBody}
- *       with the step/journey/result shape written into its untyped
- *       {@code data} map by hand — {@code GetJourneyStateResponseBody} has no
- *       typed field for any of it (see {@link SdkInteractionMapper}'s class
- *       javadoc). These fixtures encode the same JSON paths the raw
- *       {@code GoStateResponse} record used to deserialize automatically;
- *       they prove the mapper's map-walking logic is internally consistent,
- *       not that a live Go response is actually shaped this way — that is
- *       the one thing that cannot be confirmed without live credentials (see
- *       this module's README, "Known gaps").</li>
+ *   <li>{@code toInteraction} tests build an {@link InteractionFetchResponse}
+ *       via its builder; its {@code interaction} is an untyped map in 0.2.0,
+ *       so {@code collects} entries are written in their wire shape.</li>
+ *   <li>{@code toRecord} tests build a {@link StateFetchResponse} with the
+ *       steps and journey summary under {@code context.process} and the
+ *       decision in {@code result} — the shape a live Go state fetch has.</li>
  * </ul>
  */
 class SdkInteractionMapperTest {
@@ -94,11 +83,11 @@ class SdkInteractionMapperTest {
     /** Review finding 7: a Paused journey still lists outstanding elements but accepts no input. */
     @Test
     void aPausedJourneyShowsProcessingNotAnInputScreen() {
-        ResponseBody1 paused = ResponseBody1.builder()
+        InteractionFetchResponse paused = InteractionFetchResponse.builder()
                 .instanceId("instance-1")
                 .interactionId("int-1")
-                .journey(new Journey1(JourneyStatus1.PAUSED))
-                .interaction(new com.gbg.gocore.models.operations.Interaction(List.of(), List.of(), "gr-1"))
+                .journey(new InteractionFetchResponseJourney("Paused"))
+                .interaction(Map.of("collects", List.of()))
                 .outstanding(List.of("PrimaryDocument/side1Image"))
                 .build();
 
@@ -257,19 +246,67 @@ class SdkInteractionMapperTest {
         assertThat(interaction.kind()).isEqualTo(ScreenKind.FORM);
     }
 
-    private static ResponseBody1 fetchResponseWithOutstanding(List<String> outstanding) {
+    private static InteractionFetchResponse fetchResponseWithOutstanding(List<String> outstanding) {
         return fetchResponse(outstanding, null);
     }
 
-    private static ResponseBody1 fetchResponse(List<String> outstanding, List<String> instructions) {
-        return ResponseBody1.builder()
+    private static InteractionFetchResponse fetchResponse(List<String> outstanding, List<String> instructions) {
+        return InteractionFetchResponse.builder()
                 .instanceId("instance-1")
                 .interactionId("int-1")
-                .journey(new Journey1(JourneyStatus1.IN_PROGRESS))
-                .interaction(new com.gbg.gocore.models.operations.Interaction(List.of(), List.of(), "gr-1"))
+                .journey(new InteractionFetchResponseJourney("InProgress"))
+                .interaction(Map.of("collects", List.of()))
                 .outstanding(outstanding)
                 .instructions(instructions)
                 .build();
+    }
+
+    // --- collects: read from the untyped interaction map ---
+
+    @Test
+    void collectableRefsComeFromTheInteractionsCollectsInOrder() {
+        InteractionFetchResponse body = InteractionFetchResponse.builder()
+                .instanceId("instance-1")
+                .journey(new InteractionFetchResponseJourney("InProgress"))
+                .interaction(Map.of("collects", List.of(
+                        Map.of("ref", "PrimaryDocument/side1Image", "spec", "required"),
+                        Map.of("ref", "Selfie/selfieImage", "spec", "optional"),
+                        Map.of("spec", "required"))))
+                .build();
+
+        assertThat(SdkInteractionMapper.collectableRefs(body))
+                .containsExactly("PrimaryDocument/side1Image", "Selfie/selfieImage");
+    }
+
+    @Test
+    void aFetchWithNoInteractionIsStillProcessing() {
+        InteractionFetchResponse body = InteractionFetchResponse.builder()
+                .instanceId("instance-1")
+                .journey(new InteractionFetchResponseJourney("Completed"))
+                .build();
+
+        assertThat(mapper.toInteraction(body).kind()).isEqualTo(ScreenKind.PROCESSING);
+    }
+
+    @Test
+    void untypedOutstandingOfAnUnexpectedShapeIsTreatedAsEmpty() {
+        assertThat(SdkInteractionMapper.stringList("not a list")).isEmpty();
+        assertThat(SdkInteractionMapper.stringList(null)).isEmpty();
+        assertThat(SdkInteractionMapper.stringList(List.of("a", "b"))).containsExactly("a", "b");
+    }
+
+    @Test
+    void nonStringEntriesAreSkippedRatherThanTurnedIntoJunkStrings() {
+        assertThat(SdkInteractionMapper.stringList(List.of("a", Map.of("ref", "x"), 7))).containsExactly("a");
+
+        InteractionFetchResponse body = InteractionFetchResponse.builder()
+                .instanceId("instance-1")
+                .journey(new InteractionFetchResponseJourney("InProgress"))
+                .interaction(Map.of("collects", List.of(
+                        Map.of("ref", Map.of("nested", "x"), "spec", "required"),
+                        Map.of("ref", "Selfie/selfieImage", "spec", "required"))))
+                .build();
+        assertThat(SdkInteractionMapper.collectableRefs(body)).containsExactly("Selfie/selfieImage");
     }
 
     // --- Side 2: the back of a two-sided document ---
@@ -385,25 +422,22 @@ class SdkInteractionMapperTest {
         return m;
     }
 
-    private static GetJourneyStateResponseBody buildState(String status, List<Map<String, Object>> steps,
-                                                            Map<String, Object> journeyMap,
-                                                            Map<String, Object> resultMap) {
-        Map<String, Object> data = new LinkedHashMap<>();
-        if (steps != null) data.put("steps", steps);
-        if (journeyMap != null) data.put("journey", journeyMap);
-        if (resultMap != null) data.put("result", resultMap);
-        GetJourneyStateStatus typedStatus = "Completed".equals(status) ? GetJourneyStateStatus.COMPLETED
-                : "InProgress".equals(status) ? GetJourneyStateStatus.IN_PROGRESS
-                : "Failed".equals(status) ? GetJourneyStateStatus.FAILED
-                : GetJourneyStateStatus.of(status);
-        return GetJourneyStateResponseBody.builder()
+    /** Steps and journey summary under {@code context.process}, decision in {@code result} — the live shape. */
+    private static StateFetchResponse buildState(String status, List<Map<String, Object>> steps,
+                                                 Map<String, Object> journeyMap,
+                                                 Map<String, Object> resultMap) {
+        Map<String, Object> process = new LinkedHashMap<>();
+        if (steps != null) process.put("steps", steps);
+        if (journeyMap != null) process.put("journey", journeyMap);
+        return StateFetchResponse.builder()
                 .instanceId("instance-1")
-                .status(typedStatus)
-                .data(data)
+                .status(status)
+                .context(Map.of("process", process))
+                .result(resultMap)
                 .build();
     }
 
-    private static GetJourneyStateResponseBody stateResponseWith(Map<String, Object> step) {
+    private static StateFetchResponse stateResponseWith(Map<String, Object> step) {
         return buildState("Completed", List.of(step), null, resultMap(null, "positive"));
     }
 
@@ -415,7 +449,7 @@ class SdkInteractionMapperTest {
         decisionNode.put("outcome", "Decision: Accept");
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(realModule, decisionNode), null, resultMap(null, "positive")), Map.of());
+                buildState("Completed", List.of(realModule, decisionNode), null, resultMap(null, "positive")));
 
         assertThat(record.moduleRuns()).extracting("label").containsExactly("Document Authentication");
     }
@@ -424,7 +458,7 @@ class SdkInteractionMapperTest {
     void theModuleRunCarriesGosOwnDescriptiveOutcome() {
         Map<String, Object> step = stepMap("Document Classification", null, "complete", "Document Classified");
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(step));
 
         assertThat(record.moduleRuns().get(0).outcome()).isEqualTo("Document Classified");
     }
@@ -433,7 +467,7 @@ class SdkInteractionMapperTest {
     void aConfirmedPositiveOutcomePhraseIsReportedAsPassEvenWithNoOutcomeClassification() {
         Map<String, Object> step = stepMap("Document Extraction", null, "complete", "Extraction Successful");
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(step));
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
@@ -444,7 +478,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> mediumRisk = stepMap("Document Authentication", null, "complete", "Medium Risk");
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(noMatch, mediumRisk), null, resultMap(null, "positive")), Map.of());
+                buildState("Completed", List.of(noMatch, mediumRisk), null, resultMap(null, "positive")));
 
         assertThat(record.moduleRuns()).extracting("state")
                 .containsExactly(ModuleState.REVIEW, ModuleState.REVIEW);
@@ -454,7 +488,7 @@ class SdkInteractionMapperTest {
     void aModuleThatRanToCompletionButDeclinedIsReportedAsFailNotPass() {
         Map<String, Object> declined = stepMap("Document Authentication", "negative", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(declined), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(declined));
 
         assertThat(record.moduleRuns()).hasSize(1);
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.FAIL);
@@ -464,7 +498,7 @@ class SdkInteractionMapperTest {
     void aModuleThatRanToCompletionAndPassedIsReportedAsPass() {
         Map<String, Object> passed = stepMap("Document Authentication", "positive", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(passed), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(passed));
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
@@ -473,7 +507,7 @@ class SdkInteractionMapperTest {
     void aStillRunningModuleIsReportedAsRunningRegardlessOfAnyClassification() {
         Map<String, Object> running = stepMap("Facematch Verification", "negative", "pending", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(running), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(running));
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.RUNNING);
     }
@@ -482,7 +516,7 @@ class SdkInteractionMapperTest {
     void aModuleThatErroredIsReportedAsFail() {
         Map<String, Object> errored = stepMap("Document Classification", null, "error", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(errored), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(errored));
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.FAIL);
     }
@@ -491,7 +525,7 @@ class SdkInteractionMapperTest {
     void aModuleWithNoResultYetAndNoClassificationDefaultsToRunning() {
         Map<String, Object> notYetRun = stepMap("Liveness Verification", null, null, null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun));
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.RUNNING);
     }
@@ -508,7 +542,7 @@ class SdkInteractionMapperTest {
     void aModuleWithNoResultYetFallsBackToItsOwnClassification() {
         Map<String, Object> notYetRun = stepMap("Liveness Verification", "positive", null, null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(notYetRun));
 
         assertThat(record.moduleRuns().get(0).state()).isEqualTo(ModuleState.PASS);
     }
@@ -522,7 +556,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> journey = journeyMap("UK retail account opening", "12", "2026-08-26T09:41:02Z", null);
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(step), journey, resultMap(null, "positive")), Map.of());
+                buildState("Completed", List.of(step), journey, resultMap(null, "positive")));
 
         assertThat(record.moduleRuns().get(0).ms()).isEqualTo("1.6s");
         assertThat(record.timing()).isEqualTo("6.0 seconds");
@@ -535,30 +569,6 @@ class SdkInteractionMapperTest {
     }
 
     @Test
-    void journeyInfoIsReadFromContextProcessWhenNotAtTheRoot() {
-        // The live platform nests journey timing under context.process.journey,
-        // not the root — same dual path as the raw client's allSteps()/journeyInfo().
-        Map<String, Object> journey = journeyMap("Patient record access", null, "2026-08-26T09:41:02Z", "2026-08-26T09:41:04Z");
-        Map<String, Object> process = new LinkedHashMap<>();
-        process.put("journey", journey);
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("process", process);
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("result", resultMap(null, "positive"));
-        data.put("context", context);
-
-        GetJourneyStateResponseBody body = GetJourneyStateResponseBody.builder()
-                .instanceId("instance-2")
-                .status(GetJourneyStateStatus.COMPLETED)
-                .data(data)
-                .build();
-
-        RecordResponse record = mapper.toRecord(body, Map.of());
-
-        assertThat(record.summary()).contains(new SummaryRow("Journey", "Patient record access"));
-    }
-
-    @Test
     void decisionReachedFallsBackToTheLatestStepsEndedAtWhenJourneyNeverSuppliesOne() {
         Map<String, Object> earlier = stepMapWithTiming("Document Classification", null, "complete", "Document Classified",
                 "2026-08-26T09:41:00Z", "2026-08-26T09:41:38Z", 38000L);
@@ -567,7 +577,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> journey = journeyMap("Patient record access", null, "2026-08-26T09:41:00Z", null);
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(earlier, later), journey, resultMap(null, "positive")), Map.of());
+                buildState("Completed", List.of(earlier, later), journey, resultMap(null, "positive")));
 
         assertThat(record.summary()).contains(
                 new SummaryRow("Decision reached", "26 Aug 2026 09:41:44"),
@@ -578,7 +588,7 @@ class SdkInteractionMapperTest {
     void theRecordHasNoTimingRowsWhenGoSuppliesNoJourneyTiming() {
         Map<String, Object> step = stepMap("Liveness Verification", "positive", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(step));
 
         assertThat(record.summary()).containsExactly(new SummaryRow("Reference", "instance-1"));
         assertThat(record.timing()).isEmpty();
@@ -587,10 +597,6 @@ class SdkInteractionMapperTest {
 
     @Test
     void theDocumentTypeIsReadFromDocumentClassificationsOwnStepResult() {
-        // No typed context.subject set on this fixture, so this exercises the
-        // fallback raw-`data`-walking path in SdkInteractionMapper.documentTypeLabel
-        // — the same path the typed accessor falls back to on a live response
-        // if the typed classification turns out not to carry a comparable field.
         Map<String, Object> classification = Map.of("name", "Utopia (UTO) GBG Sample Identification Card (2024)");
         Map<String, Object> document = Map.of("type", "primary", "classification", classification);
         Map<String, Object> subject = Map.of("documents", List.of(document));
@@ -603,7 +609,7 @@ class SdkInteractionMapperTest {
         step.put("result", result);
 
         RecordResponse record = mapper.toRecord(
-                buildState("Completed", List.of(step), null, resultMap(null, "positive")), Map.of());
+                buildState("Completed", List.of(step), null, resultMap(null, "positive")));
 
         assertThat(record.summary())
                 .contains(new SummaryRow("Document", "Utopia (UTO) GBG Sample Identification Card (2024)"));
@@ -613,7 +619,7 @@ class SdkInteractionMapperTest {
     void thereIsNoDocumentRowWhenGoNeverReportsAType() {
         Map<String, Object> step = stepMap("Liveness Verification", "positive", "complete", null);
 
-        RecordResponse record = mapper.toRecord(stateResponseWith(step), Map.of());
+        RecordResponse record = mapper.toRecord(stateResponseWith(step));
 
         assertThat(record.summary()).noneMatch(row -> row.k().equals("Document"));
     }
