@@ -2,7 +2,7 @@
 
 One of two implementations in this repo: this one integrates with GBG Go v2
 via the official Java Core SDK, `com.gbg:go-core-sdk` (alpha,
-`0.1.0-alpha01`). See `../api-implementation/` for the sibling built on
+`0.2.0-alpha01`). See `../api-implementation/` for the sibling built on
 hand-rolled HTTP, and the root `README.md` for how the two relate. The two
 serve the identical REST contract — a front end cannot tell which one it is
 talking to — and share every Go-agnostic package (`api/`, `session/`,
@@ -52,12 +52,13 @@ profile per market sets the brand config, resource ID, and port.
 
 The user wanted the hand-rolled HTTP integration and the official SDK
 integration comparable side by side rather than one replacing the other. The
-SDK is alpha (`0.1.0-alpha01`) and its public docs name methods and types
-without documenting their field shapes — see
-`docs/sdk-jar-inspection/FINDINGS.md` for how those shapes were actually
-confirmed (by pulling the SDK's own `-sources.jar` from Maven Central and
-reading the real generated code, not guessing), before any of the classes in
-`go/sdk/` were written.
+SDK is alpha and its public docs name methods and types without documenting
+their field shapes — see `docs/sdk-jar-inspection/FINDINGS.md` for how those
+shapes were actually confirmed for `0.1.0-alpha01` (by pulling the SDK's own
+`-sources.jar` from Maven Central and reading the real generated code, not
+guessing), before any of the classes in `go/sdk/` were written. The same
+method was used for the `0.2.0-alpha01` upgrade; see "Upgrading to
+0.2.0-alpha01" below.
 
 ## Running
 
@@ -94,16 +95,9 @@ exactly as it does against api-implementation and the TypeScript mock.
 Copy `.env.example` to `.env.local`, fill in the four values, then
 `./run.sh <market>`. Never commit that file; it is gitignored.
 
-Only **Meridian Health** has a published journey (same tenant, same
-resource ID, as api-implementation). Northbank and Ridgeline still carry
-placeholder resource IDs and will fail at journey start in live mode until
-journeys exist for them.
-
-**This module has not been run against a live tenant** — there are no GBG
-credentials available in the environment this was built in. Read "Known gaps
-in this SDK integration" below in full before pointing this at a real
-tenant; several pieces are the best-available reading of the SDK's generated
-source rather than something a live call has confirmed.
+All three markets point at published journeys on the same tenant, with the
+same resource IDs as api-implementation. Read "Known gaps in this SDK
+integration" below before pointing this at a different tenant.
 
 ### Two tenant shapes
 
@@ -119,10 +113,14 @@ tenant shapes, it doesn't remove the need to configure for them:
 
 `GoSdkProperties` carries the same field set as api-implementation's
 `GoProperties` for exactly this reason. `go.region` being one of `eu`/`us`/`au`
-with no `go.base-url` override maps onto `Go.builder().serverIndex(0/1/2)` —
-confirmed to match the SDK's own `Go.SERVERS` array exactly (see
-FINDINGS.md, Q7); any other tenant (including the fabric one) uses
-`Go.builder().serverURL(go.base-url)` instead, same as before.
+with no `go.base-url` override maps onto `Go.builder().serverIndex(0/1/2)`.
+Otherwise (including every market profile here, and the fabric tenant) the
+SDK gets `Go.builder().serverURL(...)` with `go.base-url` minus its trailing
+`/v2/captain/`: since 0.2.0 the SDK adds that prefix to every operation path
+itself, so passing the full base URL would request
+`/v2/captain/v2/captain/...` (which Go answers with a misleading 401). Keep
+writing `go.base-url` the way the API reference documents it, with
+`/v2/captain/`; `GoSdkProperties.sdkServerUrl()` does the stripping.
 
 ## API docs
 
@@ -151,30 +149,26 @@ the full note on the `Secure` flag tracking the request's own scheme.
 mvn test
 ```
 
-66 tests, all passing (`mvn test` output verified when this module was
-built): 5 Go-agnostic suites copied verbatim from api-implementation
+Go-agnostic suites copied verbatim from api-implementation
 (`OnboardingFlowIntegrationTest`, `OpenApiContractTest`, `SessionTest`,
-`ScreenPlanPropertiesBindingTest`, `ScreenPlanPropertiesValidationTest`), plus
-three new suites replacing api-implementation's `DecidedStateTest` and
+`ScreenPlanPropertiesBindingTest`, `ScreenPlanPropertiesValidationTest` and
+others), plus suites replacing api-implementation's `DecidedStateTest` and
 `DefaultInteractionMapperTest`:
 
-- **`SdkDecidedStateTest`** — the go-core-sdk version of `DecidedStateTest`.
-  Both original assertions ported, against a `GetJourneyStateResponseBody`
-  built with the same step/result shape hand-written into its untyped `data`
-  map (see "Known gaps" below for why that's where it has to live).
+- **`SdkDecidedStateTest`** — the go-core-sdk version of `DecidedStateTest`,
+  against a `StateFetchResponse` built in the live shape (steps under
+  `context.process.steps`, decision in `result`).
 - **`SdkInteractionMapperTest`** — the go-core-sdk version of
-  `DefaultInteractionMapperTest`. All ~26 original assertions ported, none
-  dropped: the `toInteraction`/`currentCaptureIsDocument`/`stageFor` tests
-  build a real `ResponseBody1` via the SDK's own builder (the most-confirmed
-  shape from the spike); the `toRecord` tests build the same untyped-`data`
-  shape as `SdkDecidedStateTest`.
+  `DefaultInteractionMapperTest`. The `toInteraction` tests build an
+  `InteractionFetchResponse` via the SDK's own builder; the `toRecord` tests
+  build the same `StateFetchResponse` shape as `SdkDecidedStateTest`.
 - **`GoSdkClientExceptionMappingTest`** — new; no equivalent exists in
   api-implementation. Exercises `GoSdkClient.call()`'s classification of
-  `APIException` (404/410 → session expired, 400/422 → validation failed,
-  429 → rate limited, everything else → upstream unavailable), plus an
-  unrelated `RuntimeException` and a pass-through `OnboardingException`.
-  `call()` is left package-private specifically so this test can reach it
-  without a live Go call.
+  both SDK exceptions, `APIException` and `ErrorResponse` (404/410 → session
+  expired, 400/422 → validation failed, 429 → rate limited, everything else →
+  upstream unavailable), plus an unrelated `RuntimeException` and a
+  pass-through `OnboardingException`. `call()` is left package-private
+  specifically so this test can reach it without a live Go call.
 
 ## Known gaps in this SDK integration
 
@@ -192,44 +186,25 @@ using the same cached token passed to both security schemes. No 401 at any
 step. The two named security schemes resolve to the same bearer credential on
 the real API, as FINDINGS.md Q8 guessed.
 
-**(b) Step/module timing and the journey decision are NOT in `data` at all —
-CONFIRMED AND FIXED.** A live capture of ten consecutive `journeys().getState()`
-polls against a genuine in-progress instance came back `data={}` every single
-time, while `context` was populated. Root cause: `com.gbg.gocore.utils.JSON`'s
-shared `ObjectMapper` sets `FAIL_ON_UNKNOWN_PROPERTIES = false`, and
-`GetJourneyStateResponseBody` has no field for the wire JSON's top-level
-`steps`/`result` keys — Jackson silently drops them rather than routing them
-into `data` or erroring. This is a genuine gap in the SDK's current (alpha)
-response model for this one operation, not a wrong guess about where to look.
+**(b) The state response dropped the decision and per-module results —
+FIXED IN THE SDK (0.2.0).** Under 0.1.0, `GetJourneyStateResponseBody` had no
+field for the wire response's `result` or `context.process`, and the SDK's
+`ObjectMapper` (`FAIL_ON_UNKNOWN_PROPERTIES = false`) silently discarded
+them, so every decision read as "Referred". The workaround was a
+`RawStateBodyCapturingHttpClient` that buffered the raw bytes for a second
+parse. 0.2.0's `StateFetchResponse` keeps `context` and `result` (as untyped
+maps), so the workaround has been deleted and `SdkInteractionMapper.toRecord`
+reads `context.process.steps`, `context.process.journey` and `result`
+straight from the typed response. Checked against saved live state bodies
+before the upgrade: every field the record screen uses survives
+deserialization.
 
-Fix: `RawStateBodyCapturingHttpClient` wraps the SDK's own
-`SpeakeasyHTTPClient` and, only for a `journey/state/fetch` request, buffers
-the exact response bytes as they come off the wire — no extra network call —
-before handing back an equally-readable response for the SDK's normal typed
-parsing to continue as usual. `GoSdkClient.fetchGoState` then parses that same
-buffer itself with `JSON.getMapper()` and passes the result into
-`SdkInteractionMapper.toRecord`/`.carriesRealResult` as an explicit
-`rawStateBody` parameter, falling back to `body.data()` (confirmed always
-empty, but free to try) only if the buffer capture itself somehow comes back
-empty. Verified live: `moduleRuns`, per-module timing, and the full journey
-summary (name, reference, started/decided timestamps, total time) all
-populate correctly now — previously every field derived from `data` was
-silently absent, and every decision defaulted to "Referred" regardless of the
-real outcome, since `mapDecision` (itself an exact, previously-proven-correct
-port from `api-implementation`) was defaulting on a `null` classification it
-should never have seen.
-
-**(c) Document classification: typed path added, still falls back to the raw
-map.** Unlike (b), there **is** a typed alternative for document
-classification — `context.subject.documents[0].classification`, with
-`category`/`type`/`subtype`/`countryName`/`year` fields — but no single
-`name` string matching the old raw JSON's `classification.name`.
-`SdkInteractionMapper.documentTypeLabel()` tries composing a label from the
-typed fields first, then falls back to walking `data` for a raw
-`classification.name`, per the task's "defensive, both paths" requirement.
-Neither path is confirmed against a live response; a real one would settle
-which (if either) is right, and whether the composed typed label reads
-sensibly next to Go's actual `name` string.
+**(c) Document classification is read from the untyped step result.**
+0.2.0 removed 0.1.0's typed `context.subject.documents[].classification`
+(and its `GetJourneyStateClassification` class); `context` is now a plain
+map. `SdkInteractionMapper.documentTypeLabel()` reads
+`classification.name` from Document Classification's step result, the same
+path api-implementation uses.
 
 **(d) The biometric field-name rename is real — and the specific variant
 FINDINGS.md guessed at turned out to be wrong on closer reading.**
@@ -259,19 +234,17 @@ own Liveness Verification modules specifically; if a live submit is ever
 rejected on the biometric element on a market not yet exercised this way,
 this is still the first thing to check.
 
-**(e) `journeys().start()`'s prefill destination is a judgment call.**
-Api-implementation's raw request nested the prefill map at
-`context.subject` — untyped in the old wire shape. The SDK's
-`StartJourneyContext.subject` is now fully typed
-(`StartJourneyIdentity`/`StartJourneyDocument`/...), so an arbitrary
-`Map<String,Object>` can no longer be dropped there generically.
-`StartJourneyRequest` does carry a separate, genuinely untyped `data` field
-alongside `context` — FINDINGS.md (Q2) reads that as "the subject-prefill
-map, untyped", and `SdkInteractionMapper.toStartRequest()` follows that
-reading, sending `context.config.delivery=API` (confirmed to exist and match
-the raw `"api"` value exactly) with an empty typed `subject`, and `prefill`
-in `data`. **Not exercised against a live journey** — if prefill silently has
-no effect, this mapping is the first thing to revisit.
+**(e) Journey prefill only gets through where the SDK has a field for it.**
+Api-implementation sends the prefill map as-is at `context.subject`. The
+SDK's `StartJourneySubject` is fully typed (`identity`, `documents`,
+`biometrics`, `consent`, ...) with no catch-all for extra properties, and
+0.2.0 removed the untyped `data` field 0.1.0 had on `StartJourneyRequest`.
+`SdkInteractionMapper.toStartRequest()` converts the prefill into
+`StartJourneySubject`; any key (or nested field) the type has no field for
+is not sent, and top-level keys that are dropped are logged. A prefill that
+does not fit the type at all is logged and the journey starts without it.
+None of the front ends sends a prefill today, so this hasn't been exercised
+against a live journey.
 
 **(f) An unmapped submit field now has nowhere to go.**
 Api-implementation's `GoInteractionSubmitRequest` could always fall back to a
@@ -315,27 +288,52 @@ public platform (`gbg.token` is the only valid value there anyway) and
 irrelevant to the password grant, which never sent a scope on either
 implementation.
 
-**(i) `fetchInteraction`'s "still working" response shape carries no
-decision, so a same-poll short-circuit is lost.** Api-implementation's raw
-`GoInteractionFetchResponse` always carried a `result` field, so a fetch that
-came back `Completed` could sometimes render the decision screen directly,
-saving a round trip to `/state`. The SDK's `FetchInteractionResponseBody` is
-a `oneOf` of three shapes — `ResponseBody1` (a full interaction, used
-whenever there's something to render) and `ResponseBody2` (`instanceId` +
-`journey.status` + a `processing` flag, no `interaction`, no `result`, used
-while Go has nothing to show yet) — and `ResponseBody2` never carries a
-decision. `GoSdkClient`/`SdkInteractionMapper` always defer to a processing
-screen in that branch and rely on the front end's separate `/state` poll
-(`GoSdkClient.fetchState` → `journeys().getState()`, which *does* carry
-enough to decide, per (b) above) to surface the real outcome. This is a
-correctness-safe, deliberate behaviour difference from api-implementation —
-never a wrong answer, just occasionally one extra poll before the customer
-sees it.
+**(i) A fetch with no interaction always shows the processing screen.**
+Under 0.1.0, a fetch with nothing to render came back as a separate shape
+with no `result`, so the decision could only come from `/state`. 0.2.0's
+`InteractionFetchResponse` does carry `result`, but the behaviour is left
+unchanged: a fetch with no `interaction` defers to a processing screen and
+the front end's `/state` poll surfaces the outcome. That is never a wrong
+answer, just occasionally one extra poll before the customer sees it.
 
-**(j) Nothing in this module has been run against a live tenant.** Every
-point above says so individually, but it bears restating once, plainly: the
-spike read real generated source rather than guessing, which is why most of
-the risk here is narrower than an ordinary alpha-SDK integration would carry
-— but reading source is not the same as a response on the wire. Phase 7 of
-the project plan (live-mode verification against Meridian Health's published
-journey) is explicitly out of scope for the session that built this module.
+**(j) Submit no longer reports in-band errors with a code.**
+0.1.0 modelled a 200 response carrying `{status: "error", code, message}`
+for both fetch and submit, and `GoSdkClient` classified it by code. 0.2.0
+dropped both variants. For fetch and state, such a body still arrives as the
+union's raw-JSON fallback, so `GoSdkClient.inBandError` reads its `code` and
+classifies it as before (410 → session expired, and so on). For submit,
+`InteractionSubmitResponse` has only a `status` whose one known value is
+`success`, so the code is lost: `GoSdkClient.throwIfSubmitError` treats any
+other status, or a missing body, as an upstream failure, and the stage is
+not marked completed. Real Go errors arrive as HTTP 4XX/5XX and are handled
+by `call()`.
+
+## Upgrading to 0.2.0-alpha01
+
+The upgrade from `0.1.0-alpha01` was a breaking change for this module. What
+changed:
+
+- **Response types.** Fetch returns `InteractionFetchResponse` (was
+  `ResponseBody1`/`ResponseBody2`), state returns `StateFetchResponse` (was
+  `GetJourneyStateResponseBody` with a `data` map), start returns
+  `JourneyStartResponse` via `journeyStartResponse()`, and submit returns
+  `InteractionSubmitResponse` via `interactionSubmitResponse()`.
+- **Less typing on fetch.** `interaction`, `context` and `result` are maps,
+  and `outstanding`/`instructions` are `Object`. `SdkInteractionMapper` reads
+  `interaction.collects[].ref`/`spec` and the two string lists the same way
+  api-implementation reads raw JSON.
+- **Request signatures.** `interactions().fetch(security, view, body)` and
+  `journeys().getState(view, body)` take a body object instead of a request
+  holding the instance ID.
+- **Security.** `FetchInteractionSecurity`/`SubmitInteractionSecurity` now
+  have two bearer fields, `customerAccess` and `interactionAccess`, and no
+  one-argument constructor. `GoSdkClient` sets `interactionAccess`, as 0.1.0's
+  constructor did.
+- **Exceptions.** Go's documented error codes (for example 400, 401, 404,
+  500) now throw a new `ErrorResponse`, which extends `GoException` but not
+  `APIException`. `GoSdkClient.authorized()` and `call()` now catch
+  `GoException`; without that change, a 401 would have skipped the token
+  retry and every Go error would have been reported as "something went
+  wrong".
+- **Removed workaround.** `RawStateBodyCapturingHttpClient` was deleted; see
+  (b).

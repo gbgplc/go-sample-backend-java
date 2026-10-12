@@ -80,6 +80,18 @@ public record GoSdkProperties(
         return "https://" + region + ".platform.go.gbgplc.com/v2/captain/";
     }
 
+    /**
+     * {@link #baseUrl} without the {@code /v2/captain} API path, for
+     * {@code Go.builder().serverURL(...)}. go-core-sdk 0.2.0 moved that prefix
+     * out of its server URLs and into every operation's path, so passing
+     * {@link #baseUrl} as-is would request {@code /v2/captain/v2/captain/...}.
+     * Any other path (a gateway prefix, say) is kept, since the SDK appends
+     * {@code /v2/captain/...} to it.
+     */
+    public String sdkServerUrl() {
+        return baseUrl().replaceFirst("(?i)/v2/captain/$", "").replaceFirst("/$", "");
+    }
+
     public boolean live() {
         return "live".equalsIgnoreCase(mode);
     }
