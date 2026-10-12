@@ -510,7 +510,10 @@ public class SdkInteractionMapper {
         String goStatus = state.status();
         Map<String, Object> data = stateData(state);
 
-        Decision decision = isFailed(goStatus) ? Decision.FAIL : mapDecision(rawResult(data));
+        // A failed result.status overrides any classification beside it — see
+        // resultFailed.
+        boolean resultFailed = resultFailed(state);
+        Decision decision = isFailed(goStatus) || resultFailed ? Decision.FAIL : mapDecision(rawResult(data));
         List<RawStep> steps = rawSteps(data);
 
         List<ModuleRun> moduleRuns = steps.stream()
@@ -522,8 +525,11 @@ public class SdkInteractionMapper {
                         step.resultOutcome()))
                 .toList();
 
+        // A failed result.status is a platform outcome — a module's terminal
+        // error or the journey being abandoned — never a verdict on the
+        // customer, so it reads as one even without module advice.
         String moduleAdvice = firstModuleErrorAction(steps);
-        boolean systemError = decision == Decision.FAIL && moduleAdvice != null;
+        boolean systemError = (decision == Decision.FAIL && moduleAdvice != null) || resultFailed;
 
         String title = systemError
                 ? "We could not run your checks"
@@ -534,7 +540,9 @@ public class SdkInteractionMapper {
                 };
 
         String body_ = systemError
-                ? moduleAdvice
+                ? (moduleAdvice != null
+                        ? moduleAdvice
+                        : "We could not run your checks. Nothing has been decided about you — please try again.")
                 : switch (decision) {
                     case PASS -> "Your identity has been verified.";
                     case FAIL -> "We were not able to verify your identity from what you provided.";
@@ -585,6 +593,21 @@ public class SdkInteractionMapper {
                 null,
                 systemError
         );
+    }
+
+    /**
+     * Whether the journey's own {@code result.status} says it ended in
+     * failure. Go documents this as the authoritative success signal: a
+     * journey can pass an evaluation and then fail before finishing (a
+     * module's terminal error, or the platform abandoning it on a deadlock or
+     * timeout), leaving a positive classification beside {@code status:
+     * "error"} — and that is not a pass. Go reports an elapsed deadline as
+     * {@code error} today; {@code timeout} is accepted too.
+     */
+    public boolean resultFailed(StateFetchResponse state) {
+        Object status = state.result().map(result -> result.get("status")).orElse(null);
+        return status != null
+                && ("error".equalsIgnoreCase(status.toString()) || "timeout".equalsIgnoreCase(status.toString()));
     }
 
     /** Terminal check for {@code GoSdkClient.fetchState}: has Go reached a decision yet? */
@@ -1063,10 +1086,20 @@ public class SdkInteractionMapper {
             return m;
         }
 
+        /**
+         * The key as sent, then its leaf after the last {@code /} — but only
+         * when the leaf's entry belongs to the same domain element as the ref.
+         * Leaf names repeat across elements ({@code PreviousAddresses/postalCode}
+         * and {@code CurrentAddress/postalCode}), and matching on the leaf alone
+         * would write a previous address's postcode over the current one.
+         */
         static FieldMapping forKey(String key) {
             FieldMapping known = KNOWN.get(key);
             if (known == null && key.contains("/")) {
-                known = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+                FieldMapping byLeaf = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+                if (byLeaf != null && byLeaf.domainElementId().equals(key.substring(0, key.indexOf('/')))) {
+                    known = byLeaf;
+                }
             }
             if (known != null) return known;
             log.warn("No SDK submit mapping for field '{}' — dropped (SubmitInteractionRequest has no untyped "

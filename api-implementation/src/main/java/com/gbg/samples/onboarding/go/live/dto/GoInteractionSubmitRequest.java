@@ -274,14 +274,19 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
          * 'CurrentAddress/building' data is missing from context", which reaches
          * the customer as a Continue button that does nothing.
          *
-         * So: try the key as sent, then its leaf. Leaf names are unique across
-         * this table, and matching {@code <Element>/<leaf>} on the leaf lands a
-         * ref at the same path as the short name it duplicates.
+         * So: try the key as sent, then its leaf — but only when the leaf's
+         * entry belongs to the same domain element as the ref. Leaf names repeat
+         * across elements ({@code PreviousAddresses/postalCode} and
+         * {@code CurrentAddress/postalCode}), and matching on the leaf alone
+         * would write a previous address's postcode over the current one.
          */
         static FieldMapping forKey(String key) {
             FieldMapping known = KNOWN.get(key);
             if (known == null && key.contains("/")) {
-                known = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+                FieldMapping byLeaf = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+                if (byLeaf != null && byLeaf.domainElementId().equals(key.substring(0, key.indexOf('/')))) {
+                    known = byLeaf;
+                }
             }
             return known != null ? known : new FieldMapping(key, new String[]{key}, Wrap.NONE);
         }

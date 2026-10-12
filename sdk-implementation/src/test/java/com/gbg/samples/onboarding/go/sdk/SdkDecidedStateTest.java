@@ -90,4 +90,26 @@ class SdkDecidedStateTest {
         assertThat(mapper.carriesRealResult(state)).isFalse();
         assertThat(mapper.toRecord(state).moduleRuns()).isEmpty();
     }
+
+    /**
+     * Go documents {@code result.status} as authoritative: a journey can pass
+     * its evaluation and then fail or be abandoned before finishing, leaving a
+     * positive classification beside {@code status: "error"}.
+     */
+    @Test
+    void aFailedResultStatusBeatsAPositiveClassification() {
+        StateFetchResponse state = StateFetchResponse.builder()
+                .instanceId("i-1")
+                .status("InProgress")
+                .context(Map.of("process", Map.of("steps", List.of(doneStep("Facematch Verification")))))
+                .result(Map.of("status", "error", "outcomeClassification", "positive"))
+                .build();
+
+        RecordResponse record = mapper.toRecord(state);
+
+        assertThat(mapper.resultFailed(state)).isTrue();
+        assertThat(record.decision()).isEqualTo(Decision.FAIL);
+        assertThat(record.systemError()).isTrue();
+        assertThat(record.title()).isEqualTo("We could not run your checks");
+    }
 }

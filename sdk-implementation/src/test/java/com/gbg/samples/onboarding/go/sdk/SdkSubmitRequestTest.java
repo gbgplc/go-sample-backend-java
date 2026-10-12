@@ -74,6 +74,19 @@ class SdkSubmitRequestTest {
                 assertThat(wire.at("/" + path.replace('.', '/')).isMissingNode()).as(path).isFalse());
     }
 
+    /** A ref only resolves by its leaf when the leaf's entry belongs to the same domain element. */
+    @Test
+    void aPreviousAddressComponentDoesNotOverwriteTheCurrentAddress() throws Exception {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("PreviousAddresses/postalCode", "OX1 1AA");
+        data.put("CurrentAddress/postalCode", "SW1A 2AA");
+
+        JsonNode wire = wire(data);
+
+        assertThat(participants(wire)).containsExactly("CurrentAddress");
+        assertThat(wire.at("/context/subject/identity/currentAddress/postalCode").asText()).isEqualTo("SW1A 2AA");
+    }
+
     /** The error body is the one Go actually returned for two bad emails (live tenant, 2026-09-29). */
     @Test
     void goValidationProblemsMapBackToTheSubmittedFields() {
