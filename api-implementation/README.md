@@ -26,7 +26,9 @@ com.gbg.samples.onboarding
                               interaction/fetch, interaction/submit, state/fetch)
 ```
 
-`GoClient` has two implementations, selected by `go.mode`:
+`GoClient` has two implementations, selected by `go.mode` (`mock`,
+`test-scenarios` or `live`; `GoProperties.callsGo` decides which modes get
+the real one):
 
 - **mock** (default) — `MockGoClient` runs the same scenario scripts as the
   front end's own mock transport, so this service runs standalone with no
@@ -43,6 +45,10 @@ com.gbg.samples.onboarding
   market with nothing configured there — Northbank and Ridgeline Play today
   — gets a generic form built from whatever Go reports outstanding, rather
   than a stall or a crash.
+- **test-scenarios** — the same `GoApiClient` and credentials as live, but
+  every journey starts on a named GBG Go test scenario, so its modules return
+  outcomes you chose instead of running real checks. See "Running against GBG
+  Go test scenarios" below.
 
 One deployment fronts exactly one market — `app.market` plus a Spring
 profile per market sets the brand config, resource ID, and port, matching
@@ -56,8 +62,9 @@ for the Lombok version this build pins, and fails with symbol-not-found
 errors across the mock package.
 
 ```
-./run.sh                        # meridian-health, live  (the default)
-./run.sh northbank mock         # any market, either mode
+./run.sh                              # meridian-health, live  (the default)
+./run.sh northbank mock               # any market, any mode
+./run.sh northbank test-scenarios     # real Go, outcomes from a test scenario
 ```
 
 `run.sh` finds JDK 21, sources `.env.local`, and runs the right profile. The
@@ -86,6 +93,65 @@ Copy `.env.example` to `.env.local`, fill in the four values, then
 Only **Meridian Health** has a published journey. Northbank and Ridgeline
 still carry placeholder resource IDs and will fail at journey start in live
 mode until journeys exist for them.
+
+## Running against GBG Go test scenarios
+
+GBG Go's Test Scenarios feature runs a journey along a simulated path: each
+module returns the outcome a scenario sets, without calling live data
+providers, so a run needs no verification licence and incurs no charges. The
+journey's screens are unchanged — the customer still enters details and
+captures their ID and a selfie — but the decision comes from the scenario.
+
+1. In the Journey builder, open the market's journey, click **Test
+   Scenarios**, and save a scenario for each outcome you want to try, for
+   example `northbank-pass`, `northbank-refer` and `northbank-fail`. Outcome
+   names must match the journey's exactly, including case.
+2. Set the market's default in `application-<market>.yml`:
+
+   ```yaml
+   go:
+     test-scenario: northbank-pass
+   ```
+3. Start the backend in test-scenarios mode, with the same `.env.local` as
+   live:
+
+   ```
+   ./run.sh northbank test-scenarios
+   ```
+
+   or `mvn spring-boot:run -Dspring-boot.run.profiles=northbank
+   "-Dspring-boot.run.arguments=--go.mode=test-scenarios"`.
+4. Open the app. It starts on the default scenario; to pick another, open it
+   with `?mock_scenario=<scenario-name>`, for example
+   `http://localhost:3000/?mock_scenario=northbank-refer`. That is the same
+   query parameter mock mode uses to pick a scripted outcome.
+
+How it works: `GoApiClient` adds the `x-gbg-scenario` header to
+`journey/start`, and only to it; Go ties the scenario to the instance. A
+`?mock_scenario=` that doesn't match Go's rule (letters, numbers, `_`, `-`,
+up to 64 characters) is refused with a 400 rather than swapped for the
+default, so asking for the refer path can never quietly run the pass one.
+
+Safeguards:
+
+- If Go starts the journey without confirming a test run (`"test": false`,
+  or no `"test"` flag and no `test_` instance-ID prefix), the backend
+  abandons it before the first interaction, and logs its instance ID. Only
+  Go's reply to the start can say whether the scenario took, so the instance
+  exists by then, but none of the customer's details or captures ever reach
+  it.
+- A start Go refuses with 400, 404 or 422 is logged with Go's reason,
+  instead of reaching the customer as "Your session has ended" or a form
+  error. A 404 can also mean the journey itself doesn't exist (Northbank and
+  Ridgeline still have placeholder resource IDs). A 403 that persists with a
+  fresh token is logged as a likely sign that test scenarios aren't enabled
+  for the organisation.
+- The result screen of a test run carries a **Test run** summary row naming
+  the scenario, so its outcome is never mistaken for a real verification.
+
+Status: covered by `GoApiClientTestScenariosTest`. Not yet run against GBG
+Go: the Test Scenarios feature has a known bug, and none of this sample's
+journeys have scenarios saved yet.
 
 ### Two tenant shapes
 

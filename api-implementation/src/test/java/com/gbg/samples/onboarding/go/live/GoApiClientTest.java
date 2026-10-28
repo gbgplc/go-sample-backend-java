@@ -51,7 +51,7 @@ class GoApiClientTest {
     void setUp() {
         RestClient.Builder builder = RestClient.builder();
         go = MockRestServiceServer.bindTo(builder).build();
-        GoProperties properties = new GoProperties("live", "eu", null, null, null, "id", "secret", null, null, BASE);
+        GoProperties properties = new GoProperties("live", "eu", null, null, null, "id", "secret", null, null, BASE, null);
         client = new GoApiClient(properties, tokens,
                 new DefaultInteractionMapper(new ScreenPlanProperties(List.of(), List.of())),
                 mock(AppConfigProperties.class), builder);
