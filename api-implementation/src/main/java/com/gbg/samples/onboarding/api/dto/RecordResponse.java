@@ -25,4 +25,8 @@ public record RecordResponse(
          */
         boolean systemError
 ) {
+    /** This record with its summary replaced, every other field kept. */
+    public RecordResponse withSummary(List<SummaryRow> summary) {
+        return new RecordResponse(decision, title, timing, body, cta, moduleRuns, summary, recordNote, systemError);
+    }
 }

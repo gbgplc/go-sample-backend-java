@@ -1,11 +1,12 @@
 package com.gbg.samples.onboarding.go.live;
 
 import com.gbg.samples.onboarding.api.OnboardingException;
+import com.gbg.samples.onboarding.config.CallsGoCondition;
 import com.gbg.samples.onboarding.config.GoProperties;
 import com.gbg.samples.onboarding.go.live.dto.GoTokenResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
@@ -35,7 +36,7 @@ import java.time.Instant;
  * below is deliberately small enough to stay useful at that TTL.
  */
 @Component
-@ConditionalOnProperty(prefix = "go", name = "mode", havingValue = "live")
+@Conditional(CallsGoCondition.class)
 public class GoTokenService {
 
     private static final Logger log = LoggerFactory.getLogger(GoTokenService.class);
@@ -80,7 +81,7 @@ public class GoTokenService {
             if (isBlank(properties.password())) missing.add("go.password (GBG_PASSWORD)");
         }
         if (!missing.isEmpty()) {
-            throw new IllegalStateException("go.mode=live with grant-type " + properties.grantType()
+            throw new IllegalStateException("go.mode=" + properties.mode() + " with grant-type " + properties.grantType()
                     + " but these are not set: " + String.join(", ", missing)
                     + ". Put them in .env.local (see .env.example) or run with go.mode=mock.");
         }

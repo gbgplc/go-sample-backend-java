@@ -40,6 +40,10 @@ public class OnboardingException extends RuntimeException {
         return new OnboardingException(ErrorCode.RATE_LIMITED, message);
     }
 
+    public static OnboardingException badRequest(String message) {
+        return new OnboardingException(ErrorCode.BAD_REQUEST, message);
+    }
+
     public ErrorCode code() {
         return code;
     }
