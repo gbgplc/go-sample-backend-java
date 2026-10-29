@@ -144,7 +144,11 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
      *       required member is {@code url}.</li>
      * </ul>
      */
-    private record FieldMapping(String domainElementId, String[] path, Wrap wrap) {
+    private record FieldMapping(String domainElementId, String[] path, Wrap wrap, String part) {
+
+        FieldMapping(String domainElementId, String[] path, Wrap wrap) {
+            this(domainElementId, path, wrap, null);
+        }
 
         /** How a value is packaged at its leaf: bare, or as a single-entry array of an object. */
         private enum Wrap {
@@ -165,6 +169,8 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
             SSN,
             /** {@code previousAddresses: [{addressString}]} */
             PREVIOUS_ADDRESS,
+            /** {@code previousAddresses: [{<part>, ...}]}, every component in the first entry */
+            PREVIOUS_ADDRESS_PART,
             /** {@code documents: [{type, side1Image, side2Image}]} */
             DOCUMENT_SIDE1,
             DOCUMENT_SIDE2,
@@ -279,12 +285,22 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
          * across elements ({@code PreviousAddresses/postalCode} and
          * {@code CurrentAddress/postalCode}), and matching on the leaf alone
          * would write a previous address's postcode over the current one.
+         *
+         * A previous-address component goes into the first
+         * {@code previousAddresses[]} entry instead, with every other component
+         * of the same address.
          */
         static FieldMapping forKey(String key) {
             FieldMapping known = KNOWN.get(key);
             if (known == null && key.contains("/")) {
-                FieldMapping byLeaf = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
-                if (byLeaf != null && byLeaf.domainElementId().equals(key.substring(0, key.indexOf('/')))) {
+                String element = key.substring(0, key.indexOf('/'));
+                String leaf = key.substring(key.lastIndexOf('/') + 1);
+                if ("PreviousAddresses".equals(element)) {
+                    return new FieldMapping(element, new String[]{"identity", "previousAddresses"},
+                            Wrap.PREVIOUS_ADDRESS_PART, leaf);
+                }
+                FieldMapping byLeaf = KNOWN.get(leaf);
+                if (byLeaf != null && byLeaf.domainElementId().equals(element)) {
                     known = byLeaf;
                 }
             }
@@ -343,14 +359,11 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
             String at = "context.subject." + String.join(".", path);
             String text = String.valueOf(value);
             return switch (wrap) {
-                case PHONE -> {
-                    cursor.put(leaf, List.of(Map.of("type", "mobile", "number", text)));
-                    yield at + ".0.number";
-                }
                 // Appended, not put: a journey collecting both a personal and a
                 // work email sends them as separate fields on one screen, and
-                // the second would otherwise replace the first in emails[].
-                case PHONE_MOBILE -> at + "." + append(cursor, leaf, Map.of("type", "mobile", "number", text)) + ".number";
+                // the second would otherwise replace the first in emails[]. The
+                // same goes for a mobile and a landline in phones[].
+                case PHONE, PHONE_MOBILE -> at + "." + append(cursor, leaf, Map.of("type", "mobile", "number", text)) + ".number";
                 case PHONE_LANDLINE -> at + "." + append(cursor, leaf, Map.of("type", "landline", "number", text)) + ".number";
                 case EMAIL_PERSONAL -> at + "." + append(cursor, leaf, Map.of("type", "personal", "email", text)) + ".email";
                 case EMAIL_WORK -> at + "." + append(cursor, leaf, Map.of("type", "work", "email", text)) + ".email";
@@ -358,6 +371,20 @@ public record GoInteractionSubmitRequest(String instanceId, String interactionId
                         Map.of("type", "NationalInsuranceNumber", "idNumber", text)) + ".idNumber";
                 case SSN -> at + "." + append(cursor, leaf, Map.of("type", "SSN", "idNumber", text)) + ".idNumber";
                 case PREVIOUS_ADDRESS -> at + "." + append(cursor, leaf, Map.of("addressString", text)) + ".addressString";
+                case PREVIOUS_ADDRESS_PART -> {
+                    Object existing = cursor.get(leaf);
+                    List<Object> addresses = existing instanceof List<?> list
+                            ? (List<Object>) list
+                            : new java.util.ArrayList<>();
+                    if (!(existing instanceof List<?>)) {
+                        cursor.put(leaf, addresses);
+                    }
+                    if (addresses.isEmpty()) {
+                        addresses.add(new LinkedHashMap<String, Object>());
+                    }
+                    ((Map<String, Object>) addresses.get(0)).put(part, "country".equals(part) ? countryCode(text) : value);
+                    yield at + ".0." + part;
+                }
                 // Both document sides belong to one entry in documents[], so a
                 // second side merges into the existing object rather than
                 // appending a second document.
