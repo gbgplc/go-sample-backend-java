@@ -140,10 +140,15 @@ Safeguards:
   Go's reply to the start can say whether the scenario took, so the instance
   exists by then, but none of the customer's details or captures ever reach
   it.
+- If Go starts the run on a different scenario from the one asked for, the
+  backend abandons it the same way.
 - A start Go refuses with 400, 404 or 422 is logged with Go's reason,
   instead of reaching the customer as "Your session has ended" or a form
-  error. A 404 can also mean the journey itself doesn't exist (Northbank and
-  Ridgeline still have placeholder resource IDs). A 403 that persists with a
+  error. The exception is a 400 or 422 naming a `context.` path: that is Go
+  rejecting the prefill, and it stays a field error. A 404 can also mean the
+  journey itself doesn't exist (Northbank and Ridgeline still have
+  placeholder resource IDs); in live mode too, a 404 at start is reported as
+  a failed start, not an ended session. A 403 that persists with a
   fresh token is logged as a likely sign that test scenarios aren't enabled
   for the organisation.
 - The result screen of a test run carries a **Test run** summary row naming

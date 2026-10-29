@@ -44,6 +44,7 @@ class GoApiClientTestScenariosTest {
     private static final String BASE = "https://go.test/v2/captain/";
     private static final String TEST_START =
             "{\"instanceId\":\"test_abc\",\"status\":\"started\",\"test\":true,\"scenario\":\"northbank-pass\"}";
+    private static final String REFER_START = TEST_START.replace("northbank-pass", "northbank-refer");
     private static final String PROCESSING_FETCH =
             "{\"instanceId\":\"test_abc\",\"journey\":{\"status\":\"InProgress\"},\"processing\":true,\"outstanding\":[]}";
 
@@ -91,7 +92,7 @@ class GoApiClientTestScenariosTest {
     void theFrontEndsMockScenarioPicksTheScenario() {
         GoApiClient client = client("test-scenarios", "northbank-pass");
         go.expect(requestTo(BASE + "journey/start")).andExpect(header(GoApiClient.SCENARIO_HEADER, "northbank-refer"))
-                .andRespond(withSuccess(TEST_START, MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess(REFER_START, MediaType.APPLICATION_JSON));
         go.expect(requestTo(BASE + "journey/interaction/fetch"))
                 .andRespond(withSuccess(PROCESSING_FETCH, MediaType.APPLICATION_JSON));
 
@@ -117,7 +118,7 @@ class GoApiClientTestScenariosTest {
     void surroundingWhitespaceOnTheFrontEndsScenarioIsTrimmed() {
         GoApiClient client = client("test-scenarios", "northbank-pass");
         go.expect(requestTo(BASE + "journey/start")).andExpect(header(GoApiClient.SCENARIO_HEADER, "northbank-refer"))
-                .andRespond(withSuccess(TEST_START, MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess(REFER_START, MediaType.APPLICATION_JSON));
         go.expect(requestTo(BASE + "journey/interaction/fetch"))
                 .andRespond(withSuccess(PROCESSING_FETCH, MediaType.APPLICATION_JSON));
 
@@ -184,6 +185,48 @@ class GoApiClientTestScenariosTest {
         go.expect(requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.BAD_REQUEST)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body("{\"errors\":[{\"code\":\"400\",\"name\":\"BadRequest\",\"problem\":\"unknown scenario\",\"action\":\"\"}]}"));
+
+        OnboardingException ex = catchThrowableOfType(
+                () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
+
+        assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+    }
+
+    /** Go rejecting the prefill names the context path: that is still the customer's to fix. */
+    @Test
+    void aPrefillGoRejectsAtStartStaysAFieldError() {
+        GoApiClient client = client("test-scenarios", "northbank-pass");
+        go.expect(requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{\"errors\":[{\"code\":\"422\",\"name\":\"Unprocessable\","
+                        + "\"problem\":\"context.subject.identity.phones.0.number: Invalid phone number\",\"action\":\"\"}]}"));
+
+        OnboardingException ex = catchThrowableOfType(
+                () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
+
+        assertThat(ex.code()).isEqualTo(ErrorCode.VALIDATION_FAILED);
+    }
+
+    /** Its outcomes would otherwise be read as the requested scenario's. */
+    @Test
+    void aRunOnADifferentScenarioGoesNoFurther() {
+        GoApiClient client = client("test-scenarios", "northbank-pass");
+        go.expect(requestTo(BASE + "journey/start")).andExpect(header(GoApiClient.SCENARIO_HEADER, "northbank-refer"))
+                .andRespond(withSuccess(TEST_START, MediaType.APPLICATION_JSON));
+
+        OnboardingException ex = catchThrowableOfType(
+                () -> client.startJourney("journey@v1", null, "northbank-refer"), OnboardingException.class);
+
+        assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+        // No interaction fetch.
+        go.verify();
+    }
+
+    /** There is no session yet, so "Your session has ended" would be wrong. */
+    @Test
+    void aLive404AtStartIsNotReportedAsAnEndedSession() {
+        GoApiClient client = client("live", null);
+        go.expect(requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.NOT_FOUND));
 
         OnboardingException ex = catchThrowableOfType(
                 () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
