@@ -240,7 +240,10 @@ public class GoApiClient implements GoClient {
         //  - status "Completed" — the straightforward case;
         //  - Failed or Error — terminal too. Reporting IN_PROGRESS would leave
         //    the processing screen polling an instance that will never advance,
-        //    so it reports COMPLETED carrying a `fail` decision;
+        //    so it reports COMPLETED carrying a `fail` decision. A result.status
+        //    of error counts the same, whatever the journey status says: Go
+        //    documents it as authoritative, and an abandoned journey will not
+        //    move again;
         //  - a decision reached with every module run finished. The Northbank
         //    journey settles on `refer` without its status ever reaching
         //    Completed (verified on the live tenant, 2026-09-10): the referral
@@ -260,6 +263,7 @@ public class GoApiClient implements GoClient {
 
         JourneyStatus status = "Completed".equalsIgnoreCase(response.status())
                 || DefaultInteractionMapper.isFailed(response.status())
+                || DefaultInteractionMapper.resultFailed(response.result())
                 || decided
                 ? JourneyStatus.COMPLETED
                 : JourneyStatus.IN_PROGRESS;

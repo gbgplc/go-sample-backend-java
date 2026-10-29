@@ -69,4 +69,25 @@ class DecidedStateTest {
         assertThat(record.title()).isEqualTo("Verification complete");
         assertThat(record.body()).isEqualTo("Your identity has been verified.");
     }
+
+    /**
+     * Go documents {@code result.status} as authoritative: a journey can pass
+     * its evaluation and then fail or be abandoned before finishing, leaving a
+     * positive classification beside {@code status: "error"}.
+     */
+    @Test
+    void aFailedResultStatusBeatsAPositiveClassification() {
+        GoStateResponse state = new GoStateResponse(
+                "i-1", "InProgress", null,
+                List.of(done("Facematch Verification"), evaluation("positive")),
+                new GoResult("Decision: Accept", "error", "positive", null, null),
+                null);
+
+        RecordResponse record = mapper.toRecord(state);
+
+        assertThat(record.decision()).isEqualTo(Decision.FAIL);
+        assertThat(record.systemError()).isTrue();
+        assertThat(record.title()).isEqualTo("We could not run your checks");
+        assertThat(record.body()).isEqualTo("We could not run your checks. Nothing has been decided about you — please try again.");
+    }
 }

@@ -590,7 +590,10 @@ public class DefaultInteractionMapper {
         // On a Failed journey the result object is often absent or incomplete;
         // mapDecision would default that to REFER ("With our team"), telling the
         // customer a review is under way when nothing is running at all.
-        Decision decision = isFailed(response.status()) ? Decision.FAIL : mapDecision(response.result());
+        // A failed result.status overrides any classification beside it — see
+        // resultFailed.
+        boolean resultFailed = resultFailed(response.result());
+        Decision decision = isFailed(response.status()) || resultFailed ? Decision.FAIL : mapDecision(response.result());
         // The journey graph's own terminal decision node has no name and no
         // result — every real module has both. Without this filter it falls
         // back to its raw nodeId (e.g. "mtrehx2922ie24j37zu") and shows up as
@@ -612,8 +615,12 @@ public class DefaultInteractionMapper {
         // invites another attempt — so the two are worded differently, and the
         // error case borrows Go's own advice ("Please verify the document image
         // and try again") over anything generic we could write.
+        //
+        // A failed result.status is a platform outcome too — a module's
+        // terminal error or the journey being abandoned — never a verdict on
+        // the customer, so it reads the same way even without module advice.
         String moduleAdvice = firstModuleErrorAction(response);
-        boolean systemError = decision == Decision.FAIL && moduleAdvice != null;
+        boolean systemError = (decision == Decision.FAIL && moduleAdvice != null) || resultFailed;
 
         String title = systemError
                 ? "We could not run your checks"
@@ -624,7 +631,9 @@ public class DefaultInteractionMapper {
                 };
 
         String body = systemError
-                ? moduleAdvice
+                ? (moduleAdvice != null
+                        ? moduleAdvice
+                        : "We could not run your checks. Nothing has been decided about you — please try again.")
                 : switch (decision) {
                     case PASS -> "Your identity has been verified.";
                     case FAIL -> "We were not able to verify your identity from what you provided.";
@@ -794,6 +803,20 @@ public class DefaultInteractionMapper {
      */
     static boolean isFailed(String goStatus) {
         return "Failed".equalsIgnoreCase(goStatus) || "Error".equalsIgnoreCase(goStatus);
+    }
+
+    /**
+     * Whether the journey's own {@code result.status} says it ended in
+     * failure. Go documents this as the authoritative success signal: a
+     * journey can pass an evaluation and then fail before finishing (a
+     * module's terminal error, or the platform abandoning it on a deadlock or
+     * timeout), leaving a positive classification beside {@code status:
+     * "error"} — and that is not a pass. Go reports an elapsed deadline as
+     * {@code error} today; {@code timeout} is accepted too.
+     */
+    static boolean resultFailed(com.gbg.samples.onboarding.go.live.dto.GoResult result) {
+        String status = result == null ? null : result.status();
+        return "error".equalsIgnoreCase(status) || "timeout".equalsIgnoreCase(status);
     }
 
     private JourneyStatus mapStatus(String goStatus, boolean processing) {

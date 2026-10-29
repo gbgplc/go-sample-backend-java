@@ -37,4 +37,21 @@ class GoInteractionSubmitRequestTest {
                 Map.entry("context.subject.identity.emails.1.email", "WorkEmail/email"),
                 Map.entry("context.subject.identity.currentAddress.postalCode", "CurrentAddress/postalCode"));
     }
+
+    /** A ref only resolves by its leaf when the leaf's entry belongs to the same domain element. */
+    @Test
+    void aPreviousAddressComponentDoesNotOverwriteTheCurrentAddress() {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("PreviousAddresses/postalCode", "OX1 1AA");
+        data.put("CurrentAddress/postalCode", "SW1A 2AA");
+
+        GoInteractionSubmitRequest request = GoInteractionSubmitRequest.of("i-1", "int-1", data, "https://consent");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> identity = (Map<String, Object>) request.context().subject().get("identity");
+        assertThat(identity.get("currentAddress")).isEqualTo(Map.of("postalCode", "SW1A 2AA"));
+        assertThat(request.participants()).containsExactly(
+                new GoInteractionSubmitRequest.Participant("PreviousAddresses/postalCode"),
+                new GoInteractionSubmitRequest.Participant("CurrentAddress"));
+    }
 }
