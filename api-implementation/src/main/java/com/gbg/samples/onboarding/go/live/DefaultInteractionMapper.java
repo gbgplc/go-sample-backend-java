@@ -816,7 +816,7 @@ public class DefaultInteractionMapper {
      */
     static boolean resultFailed(com.gbg.samples.onboarding.go.live.dto.GoResult result) {
         String status = result == null ? null : result.status();
-        return "error".equalsIgnoreCase(status) || "timeout".equalsIgnoreCase(status);
+        return "error".equalsIgnoreCase(status) || "timeout".equalsIgnoreCase(status) || "abandoned".equalsIgnoreCase(status);
     }
 
     private JourneyStatus mapStatus(String goStatus, boolean processing) {
