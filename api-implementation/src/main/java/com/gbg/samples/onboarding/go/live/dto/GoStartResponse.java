@@ -23,6 +23,6 @@ public record GoStartResponse(String instanceId, String status, String message, 
     }
 
     public static boolean isTestInstance(String instanceId) {
-        return instanceId != null && instanceId.startsWith("test_");
+        return instanceId != null && (instanceId.startsWith("sandbox_") || instanceId.startsWith("test_"));
     }
 }
