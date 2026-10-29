@@ -16,12 +16,16 @@ public record GoStartResponse(String instanceId, String status, String message, 
     /**
      * A test run, by Go's own flag when it sent one — {@code "test": false}
      * means not a test run, whatever the instance ID looks like — and by the
-     * {@code test_} prefix Go gives a test run's instance ID only when it didn't.
+     * instance ID's prefix only when it didn't.
      */
     public boolean isTestRun() {
         return test != null ? test : isTestInstance(instanceId);
     }
 
+    /**
+     * Go gives a test run's instance ID a {@code sandbox_} prefix (gbggo4-demo,
+     * 2026-10-29); {@code test_} is accepted too.
+     */
     public static boolean isTestInstance(String instanceId) {
         return instanceId != null && (instanceId.startsWith("sandbox_") || instanceId.startsWith("test_"));
     }

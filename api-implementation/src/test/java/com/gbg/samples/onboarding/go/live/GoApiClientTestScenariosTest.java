@@ -2,14 +2,14 @@ package com.gbg.samples.onboarding.go.live;
 
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.ErrorCode;
-import com.gbg.samples.onboarding.api.dto.RecordResponse;
-import com.gbg.samples.onboarding.api.dto.SummaryRow;
 import com.gbg.samples.onboarding.config.AppConfigProperties;
 import com.gbg.samples.onboarding.config.CallsGoCondition;
 import com.gbg.samples.onboarding.config.GoProperties;
 import com.gbg.samples.onboarding.config.ScreenPlanProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -43,10 +43,10 @@ class GoApiClientTestScenariosTest {
 
     private static final String BASE = "https://go.test/v2/captain/";
     private static final String TEST_START =
-            "{\"instanceId\":\"test_abc\",\"status\":\"started\",\"test\":true,\"scenario\":\"northbank-pass\"}";
+            "{\"instanceId\":\"sandbox_abc\",\"status\":\"started\",\"test\":true,\"scenario\":\"northbank-pass\"}";
     private static final String REFER_START = TEST_START.replace("northbank-pass", "northbank-refer");
     private static final String PROCESSING_FETCH =
-            "{\"instanceId\":\"test_abc\",\"journey\":{\"status\":\"InProgress\"},\"processing\":true,\"outstanding\":[]}";
+            "{\"instanceId\":\"sandbox_abc\",\"journey\":{\"status\":\"InProgress\"},\"processing\":true,\"outstanding\":[]}";
 
     private final GoTokenService tokens = mock(GoTokenService.class);
     private MockRestServiceServer go;
@@ -68,7 +68,7 @@ class GoApiClientTestScenariosTest {
         go.expect(requestTo(BASE + "journey/start")).andExpect(headerDoesNotExist(GoApiClient.SCENARIO_HEADER))
                 .andRespond(withSuccess("{\"instanceId\":\"i-1\",\"status\":\"started\"}", MediaType.APPLICATION_JSON));
         go.expect(requestTo(BASE + "journey/interaction/fetch"))
-                .andRespond(withSuccess(PROCESSING_FETCH.replace("test_abc", "i-1"), MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess(PROCESSING_FETCH.replace("sandbox_abc", "i-1"), MediaType.APPLICATION_JSON));
 
         client.startJourney("journey@v1", null, "northbank-refer");
 
@@ -84,7 +84,7 @@ class GoApiClientTestScenariosTest {
                 .andExpect(headerDoesNotExist(GoApiClient.SCENARIO_HEADER))
                 .andRespond(withSuccess(PROCESSING_FETCH, MediaType.APPLICATION_JSON));
 
-        assertThat(client.startJourney("journey@v1", null, null).instanceId()).isEqualTo("test_abc");
+        assertThat(client.startJourney("journey@v1", null, null).instanceId()).isEqualTo("sandbox_abc");
         go.verify();
     }
 
@@ -135,6 +135,7 @@ class GoApiClientTestScenariosTest {
                 () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
 
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+        assertThat(ex.retryable()).isFalse();
         go.verify();
     }
 
@@ -148,6 +149,8 @@ class GoApiClientTestScenariosTest {
                 () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
 
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+        // Retrying would only create and abandon another instance.
+        assertThat(ex.retryable()).isFalse();
         // No interaction fetch, so nothing further happens on the live instance.
         go.verify();
     }
@@ -157,7 +160,7 @@ class GoApiClientTestScenariosTest {
     void anExplicitTestFalseStopsTheJourneyEvenWithATestPrefix() {
         GoApiClient client = client("test-scenarios", "northbank-pass");
         go.expect(requestTo(BASE + "journey/start")).andRespond(withSuccess(
-                "{\"instanceId\":\"test_abc\",\"status\":\"started\",\"test\":false}", MediaType.APPLICATION_JSON));
+                "{\"instanceId\":\"sandbox_abc\",\"status\":\"started\",\"test\":false}", MediaType.APPLICATION_JSON));
 
         OnboardingException ex = catchThrowableOfType(
                 () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
@@ -170,11 +173,11 @@ class GoApiClientTestScenariosTest {
     void aStartWithoutTheTestFlagStillCountsOnTheTestPrefix() {
         GoApiClient client = client("test-scenarios", "northbank-pass");
         go.expect(requestTo(BASE + "journey/start")).andRespond(withSuccess(
-                "{\"instanceId\":\"test_abc\",\"status\":\"started\"}", MediaType.APPLICATION_JSON));
+                "{\"instanceId\":\"sandbox_abc\",\"status\":\"started\"}", MediaType.APPLICATION_JSON));
         go.expect(requestTo(BASE + "journey/interaction/fetch"))
                 .andRespond(withSuccess(PROCESSING_FETCH, MediaType.APPLICATION_JSON));
 
-        assertThat(client.startJourney("journey@v1", null, null).instanceId()).isEqualTo("test_abc");
+        assertThat(client.startJourney("journey@v1", null, null).instanceId()).isEqualTo("sandbox_abc");
         go.verify();
     }
 
@@ -190,6 +193,7 @@ class GoApiClientTestScenariosTest {
                 () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
 
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+        assertThat(ex.retryable()).isFalse();
     }
 
     /** Go rejecting the prefill names the context path: that is still the customer's to fix. */
@@ -218,20 +222,23 @@ class GoApiClientTestScenariosTest {
                 () -> client.startJourney("journey@v1", null, "northbank-refer"), OnboardingException.class);
 
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+        assertThat(ex.retryable()).isFalse();
         // No interaction fetch.
         go.verify();
     }
 
     /** There is no session yet, so "Your session has ended" would be wrong. */
-    @Test
-    void aLive404AtStartIsNotReportedAsAnEndedSession() {
+    @ParameterizedTest
+    @ValueSource(ints = {404, 410})
+    void aLiveNotFoundAtStartIsNotReportedAsAnEndedSession(int status) {
         GoApiClient client = client("live", null);
-        go.expect(requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.NOT_FOUND));
+        go.expect(requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.valueOf(status)));
 
         OnboardingException ex = catchThrowableOfType(
                 () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
 
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+        assertThat(ex.retryable()).isFalse();
     }
 
     @Test
@@ -240,9 +247,12 @@ class GoApiClientTestScenariosTest {
         // call() mints a fresh token and retries once on a 403.
         go.expect(times(2), requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.FORBIDDEN));
 
-        assertThatThrownBy(() -> client.startJourney("journey@v1", null, null)).isInstanceOf(OnboardingException.class);
+        OnboardingException ex = catchThrowableOfType(
+                () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
 
         assertThat(output).contains("may not be enabled for this organisation");
+        // So the front end doesn't retry into another token mint.
+        assertThat(ex.retryable()).isFalse();
     }
 
     @Test
@@ -250,9 +260,12 @@ class GoApiClientTestScenariosTest {
         GoApiClient client = client("test-scenarios", "northbank-pass");
         go.expect(requestTo(BASE + "journey/start")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
 
-        assertThatThrownBy(() -> client.startJourney("journey@v1", null, null)).isInstanceOf(OnboardingException.class);
+        OnboardingException ex = catchThrowableOfType(
+                () -> client.startJourney("journey@v1", null, null), OnboardingException.class);
 
         assertThat(output).doesNotContain("may not be enabled");
+        // A Go outage can pass.
+        assertThat(ex.retryable()).isTrue();
     }
 
     @Test
@@ -268,30 +281,26 @@ class GoApiClientTestScenariosTest {
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
     }
 
+    /** The session keeps it, to label the record (see SessionServiceTest). */
     @Test
-    void aTestRunsRecordSaysSoWithItsScenario() {
+    void aTestRunReportsTheScenarioItStartedOn() {
         GoApiClient client = client("test-scenarios", "northbank-pass");
         go.expect(requestTo(BASE + "journey/start")).andRespond(withSuccess(TEST_START, MediaType.APPLICATION_JSON));
         go.expect(requestTo(BASE + "journey/interaction/fetch"))
                 .andRespond(withSuccess(PROCESSING_FETCH, MediaType.APPLICATION_JSON));
-        go.expect(requestTo(BASE + "journey/state/fetch")).andRespond(withSuccess(
-                "{\"instanceId\":\"test_abc\",\"status\":\"Completed\",\"result\":{\"status\":\"complete\","
-                        + "\"outcomeClassification\":\"positive\"}}", MediaType.APPLICATION_JSON));
 
-        client.startJourney("journey@v1", null, null);
-        RecordResponse record = client.fetchRecord("test_abc");
-
-        assertThat(record.summary().get(0)).isEqualTo(new SummaryRow("Test run", "Yes, scenario northbank-pass"));
+        assertThat(client.startJourney("journey@v1", null, null).testScenario()).isEqualTo("northbank-pass");
     }
 
     @Test
-    void aLiveRunsRecordHasNoTestRow() {
-        GoApiClient client = client("live", null);
-        go.expect(requestTo(BASE + "journey/state/fetch")).andRespond(withSuccess(
-                "{\"instanceId\":\"i-1\",\"status\":\"Completed\",\"result\":{\"outcomeClassification\":\"positive\"}}",
-                MediaType.APPLICATION_JSON));
+    void aLiveRunReportsNoScenario() {
+        GoApiClient client = client("live", "northbank-pass");
+        go.expect(requestTo(BASE + "journey/start"))
+                .andRespond(withSuccess("{\"instanceId\":\"i-1\",\"status\":\"started\"}", MediaType.APPLICATION_JSON));
+        go.expect(requestTo(BASE + "journey/interaction/fetch"))
+                .andRespond(withSuccess(PROCESSING_FETCH.replace("sandbox_abc", "i-1"), MediaType.APPLICATION_JSON));
 
-        assertThat(client.fetchRecord("i-1").summary()).noneMatch(row -> row.k().equals("Test run"));
+        assertThat(client.startJourney("journey@v1", null, null).testScenario()).isNull();
     }
 
     @Test

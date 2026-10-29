@@ -104,7 +104,12 @@ public class DefaultInteractionMapper {
         // no Failed member (see onboarding-core types.ts — it is InProgress |
         // PendingInput | Completed), so this surfaces as what that contract can
         // represent: a terminal result screen carrying a `fail` decision.
-        if (isFailed(goStatus)) {
+        //
+        // A failed result.status reads the same whatever the journey status
+        // beside it, as in toRecord: otherwise a Completed journey whose
+        // result is error or abandoned shows "Verification complete" here
+        // while its record says the checks could not run.
+        if (isFailed(goStatus) || resultFailed(response.result())) {
             return new Interaction(
                     interactionId, ScreenKind.RESULT, "Decision", null,
                     "We could not complete your verification",
@@ -812,7 +817,8 @@ public class DefaultInteractionMapper {
      * module's terminal error, or the platform abandoning it on a deadlock or
      * timeout), leaving a positive classification beside {@code status:
      * "error"} — and that is not a pass. Go reports an elapsed deadline as
-     * {@code error} today; {@code timeout} is accepted too.
+     * {@code error} today; {@code timeout} is accepted too. A deadlocked
+     * journey reports {@code abandoned} (gbggo4-demo, 2026-10-29).
      */
     static boolean resultFailed(com.gbg.samples.onboarding.go.live.dto.GoResult result) {
         String status = result == null ? null : result.status();

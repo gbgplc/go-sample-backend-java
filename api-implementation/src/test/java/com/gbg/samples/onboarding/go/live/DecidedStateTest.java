@@ -1,14 +1,19 @@
 package com.gbg.samples.onboarding.go.live;
 
 import com.gbg.samples.onboarding.api.dto.Decision;
+import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.ModuleState;
 import com.gbg.samples.onboarding.api.dto.RecordResponse;
+import com.gbg.samples.onboarding.api.dto.ScreenKind;
 import com.gbg.samples.onboarding.config.ScreenPlanProperties;
+import com.gbg.samples.onboarding.go.live.dto.GoInteractionFetchResponse;
 import com.gbg.samples.onboarding.go.live.dto.GoResult;
 import com.gbg.samples.onboarding.go.live.dto.GoStateResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -89,5 +94,41 @@ class DecidedStateTest {
         assertThat(record.systemError()).isTrue();
         assertThat(record.title()).isEqualTo("We could not run your checks");
         assertThat(record.body()).isEqualTo("We could not run your checks. Nothing has been decided about you — please try again.");
+    }
+
+    /** The result of a deadlocked journey, from gbggo4-demo (2026-10-29, sandbox_QPgHrNztUswy5tZySLOUfe). */
+    private static GoResult abandoned() {
+        return new GoResult(null, "abandoned", null,
+                List.of(Map.of("code", "MODULE_DECLARED_OUTPUT_MISSING"), Map.of("code", "JOURNEY_ABANDONED")), null);
+    }
+
+    /** A platform failure, not a verdict on the customer, so never "Declined". */
+    @Test
+    void anAbandonedJourneyIsASystemErrorNotADecline() {
+        GoStateResponse state = new GoStateResponse(
+                "sandbox_QPgHrNztUswy5tZySLOUfe", "Error", null,
+                List.of(done("Document Classification")),
+                abandoned(),
+                null);
+
+        RecordResponse record = mapper.toRecord(state);
+
+        assertThat(record.decision()).isEqualTo(Decision.FAIL);
+        assertThat(record.systemError()).isTrue();
+        assertThat(record.title()).isEqualTo("We could not run your checks");
+    }
+
+    /** The interaction screen agrees with the record, whatever the journey status says. */
+    @Test
+    void aCompletedJourneyWithAFailedResultIsNotAPass() {
+        GoInteractionFetchResponse fetch = new GoInteractionFetchResponse(
+                "i-1", new GoInteractionFetchResponse.Journey("Completed"), null, null, false, List.of(), List.of(),
+                new GoResult("Decision: Accept", "error", "positive", null, null));
+
+        Interaction interaction = mapper.toInteraction(fetch, Set.of());
+
+        assertThat(interaction.kind()).isEqualTo(ScreenKind.RESULT);
+        assertThat(interaction.decision()).isEqualTo(Decision.FAIL);
+        assertThat(interaction.title()).isNotEqualTo("Verification complete");
     }
 }
