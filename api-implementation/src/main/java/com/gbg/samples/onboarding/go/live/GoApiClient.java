@@ -32,7 +32,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -184,7 +183,14 @@ public class GoApiClient implements GoClient {
      */
     String scenarioFor(String scenarioHint) {
         if (!testScenarios) return null;
-        if (scenarioHint == null || scenarioHint.isBlank()) return defaultScenario;
+        if (scenarioHint == null || scenarioHint.isBlank()) {
+            if (defaultScenario == null) {
+                log.error("Test scenarios mode, but no scenario to start on: set go.test-scenario for this market "
+                        + "or open the app with ?mock_scenario=<scenario-name>");
+                throw OnboardingException.upstreamUnavailable("This test journey has no test scenario configured.");
+            }
+            return defaultScenario;
+        }
         String named = scenarioHint.trim();
         if (!SCENARIO_NAME.matcher(named).matches()) {
             // The value itself is not logged: it comes straight from the browser.
@@ -193,6 +199,43 @@ public class GoApiClient implements GoClient {
                     + "numbers, _ and -, up to 64 characters.");
         }
         return named;
+    }
+
+    /** A {@code path: message} segment naming something the start request's context carried, i.e. the prefill. */
+    private static final Pattern CONTEXT_PROBLEM = Pattern.compile("(^|;\\s*)context\\.[^:;]*: ");
+
+    /**
+     * How a refused journey/start reaches the customer. There is no session
+     * yet, so {@code call()}'s defaults mislead here: a 404 would say "Your
+     * session has ended", and on a test scenario a 400 or 422 would show as a
+     * field error on a screen the customer hasn't filled in. We don't know
+     * which of the three Go uses for a scenario it can't run, so all three are
+     * covered — except a 400/422 naming a {@code context.} path, which is Go
+     * rejecting the prefill and stays a field error.
+     */
+    private Refusal startRefusal(String scenario) {
+        return (status, goDetail) -> {
+            if (scenario != null && status == 403) {
+                log.warn("GBG Go answered journey/start on test scenario '{}' with 403, even with a fresh token. "
+                        + "Test scenarios may not be enabled for this organisation.", scenario);
+                return null;
+            }
+            boolean scenarioRefused = scenario != null && (status == 400 || status == 422)
+                    && !CONTEXT_PROBLEM.matcher(goDetail == null ? "" : goDetail).find();
+            if (status == 404 && scenario == null) {
+                log.error("GBG Go answered journey/start with 404. Check this market's app.resource-id names "
+                        + "a published journey.");
+                return OnboardingException.upstreamUnavailable("Could not start your verification. Try again shortly.");
+            }
+            if (status == 404 || scenarioRefused) {
+                log.error("GBG Go refused journey/start on test scenario '{}' ({}): {}. Check the scenario is "
+                        + "saved on this journey (Journey builder → Test Scenarios) and its outcome names "
+                        + "match the journey's exactly. A 404 can also mean the journey itself doesn't exist: "
+                        + "check this market's app.resource-id.", scenario, status, goDetail);
+                return OnboardingException.upstreamUnavailable("This test journey could not start on its test scenario.");
+            }
+            return null;
+        };
     }
 
     /**
@@ -204,52 +247,17 @@ public class GoApiClient implements GoClient {
     @Override
     public GoStartResult startJourney(String resourceId, Map<String, Object> prefill, String scenarioHint) {
         String scenario = scenarioFor(scenarioHint);
-        if (testScenarios && scenario == null) {
-            log.error("Test scenarios mode, but no scenario to start on: set go.test-scenario for this market "
-                    + "or open the app with ?mock_scenario=<scenario-name>");
-            throw OnboardingException.upstreamUnavailable("This test journey has no test scenario configured.");
-        }
-        // The status of the last journey/start Go refused, so a 403 can be
-        // told apart once call() has turned it into an OnboardingException.
-        AtomicInteger refusedWith = new AtomicInteger();
-        GoStartResponse started;
-        try {
-            started = call(token -> {
-                RestClient.RequestBodySpec request = client.post()
-                        .uri("journey/start")
-                        .header("Authorization", "Bearer " + token);
-                if (scenario != null) {
-                    request = request.header(SCENARIO_HEADER, scenario);
-                }
-                try {
-                    return request.body(GoStartRequest.of(resourceId, prefill))
-                            .retrieve()
-                            .body(GoStartResponse.class);
-                } catch (RestClientResponseException e) {
-                    // A start Go refuses in test-scenarios mode would otherwise
-                    // reach the customer as "Your session has ended" (404) or
-                    // as a field validation error (400, 422) on a screen they
-                    // haven't filled in. We don't know which of the three Go
-                    // uses for a scenario it can't run, so all three land here.
-                    int status = e.getStatusCode().value();
-                    refusedWith.set(status);
-                    if (scenario != null && (status == 400 || status == 404 || status == 422)) {
-                        log.error("GBG Go refused journey/start on test scenario '{}' ({}): {}. Check the scenario is "
-                                + "saved on this journey (Journey builder → Test Scenarios) and its outcome names "
-                                + "match the journey's exactly. A 404 can also mean the journey itself doesn't exist: "
-                                + "check this market's app.resource-id.", scenario, status, describeGoError(e));
-                        throw OnboardingException.upstreamUnavailable("This test journey could not start on its test scenario.");
-                    }
-                    throw e;
-                }
-            });
-        } catch (OnboardingException e) {
-            if (scenario != null && refusedWith.get() == 403) {
-                log.warn("GBG Go answered journey/start on test scenario '{}' with 403, even with a fresh token. "
-                        + "Test scenarios may not be enabled for this organisation.", scenario);
+        GoStartResponse started = call(token -> {
+            RestClient.RequestBodySpec request = client.post()
+                    .uri("journey/start")
+                    .header("Authorization", "Bearer " + token);
+            if (scenario != null) {
+                request = request.header(SCENARIO_HEADER, scenario);
             }
-            throw e;
-        }
+            return request.body(GoStartRequest.of(resourceId, prefill))
+                    .retrieve()
+                    .body(GoStartResponse.class);
+        }, Map.of(), startRefusal(scenario));
         if (started == null || started.instanceId() == null) {
             throw OnboardingException.upstreamUnavailable("Could not start your verification. Try again shortly.");
         }
@@ -267,10 +275,16 @@ public class GoApiClient implements GoClient {
                         scenario, started.instanceId(), started.test());
                 throw OnboardingException.upstreamUnavailable("This test journey could not start on its test scenario.");
             }
-            String ranOn = started.scenario() == null ? scenario : started.scenario();
-            testScenarioByInstance.put(started.instanceId(), ranOn);
+            // A run on some other scenario is the silent swap scenarioFor
+            // refuses to make: its outcomes would be read as this scenario's.
+            if (started.scenario() != null && !started.scenario().equals(scenario)) {
+                log.error("Asked GBG Go for test scenario '{}' but instance {} started on scenario '{}'. "
+                        + "Abandoning it before any interaction.", scenario, started.instanceId(), started.scenario());
+                throw OnboardingException.upstreamUnavailable("This test journey could not start on its test scenario.");
+            }
+            testScenarioByInstance.put(started.instanceId(), scenario);
             log.info("Started test run {} on scenario '{}': modules return the scenario's outcomes, no live checks",
-                    started.instanceId(), ranOn);
+                    started.instanceId(), scenario);
         }
         SubmitInteractionResponse first = fetchInteraction(started.instanceId());
         return new GoStartResult(started.instanceId(), first.status(), first.interaction());
@@ -510,6 +524,16 @@ public class GoApiClient implements GoClient {
         return call(request, Map.of());
     }
 
+    private <T> T call(Function<String, T> request, Map<String, String> fieldsByGoPath) {
+        return call(request, fieldsByGoPath, (status, goDetail) -> null);
+    }
+
+    /** A caller's own reading of a status Go refused with; null leaves it to {@code call()}'s defaults. */
+    @FunctionalInterface
+    private interface Refusal {
+        OnboardingException classify(int status, String goDetail);
+    }
+
     /**
      * Runs {@code request} with the current access token and translates Go's
      * failures into this service's own envelope.
@@ -522,8 +546,9 @@ public class GoApiClient implements GoClient {
      * @param fieldsByGoPath for a submit, where each submitted field landed in
      *                       the request (see {@link GoInteractionSubmitRequest#fieldsByGoPath}),
      *                       so a 400/422 can name the fields Go rejected.
+     * @param refusal        consulted first once Go has refused the call, after the token retry.
      */
-    private <T> T call(Function<String, T> request, Map<String, String> fieldsByGoPath) {
+    private <T> T call(Function<String, T> request, Map<String, String> fieldsByGoPath, Refusal refusal) {
         try {
             String token = tokenService.accessToken();
             try {
@@ -541,6 +566,10 @@ public class GoApiClient implements GoClient {
             HttpStatusCode statusCode = e.getStatusCode();
             String goDetail = describeGoError(e);
             log.warn("GBG Go call failed: {} {}", statusCode, goDetail);
+            OnboardingException classified = refusal.classify(statusCode.value(), goDetail);
+            if (classified != null) {
+                throw classified;
+            }
             if (statusCode.value() == 404 || statusCode.value() == 410) {
                 throw OnboardingException.sessionExpired("Your session has ended. Start again to continue.");
             }
