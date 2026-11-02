@@ -276,6 +276,9 @@ public class GoSdkClient implements GoClient {
 
         JourneyStatus status = "Completed".equalsIgnoreCase(goStatus)
                 || SdkInteractionMapper.isFailed(goStatus)
+                // A failed result.status is terminal too: Go documents it as
+                // authoritative, and an abandoned journey will not move again.
+                || mapper.resultFailed(state)
                 || decided
                 ? JourneyStatus.COMPLETED
                 : JourneyStatus.IN_PROGRESS;
