@@ -344,6 +344,32 @@ class DefaultInteractionMapperTest {
         assertThat(interaction.stage()).isEqualTo("Biometrics");
     }
 
+    /**
+     * The first fetch after the back is submitted, as Go returned it on the
+     * live tenant (2026-11-02, Meridian): side2Image already gone from
+     * outstanding, the instruction not yet updated. The back screen used to
+     * open again, and the capture taken on it went to Go as the selfie.
+     */
+    @Test
+    void aStaleSide2RequiredAfterTheBackIsSubmittedMovesOnToTheSelfie() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage"), List.of("Side2Required")),
+                Set.of("document", "document#back-submitted"));
+
+        assertThat(interaction.stage()).isEqualTo("Biometrics");
+        assertThat(mapper.secondSideMarker()).contains("document#back-submitted");
+    }
+
+    /** A back Go rejects comes back as side2Image outstanding, which still reopens the back screen. */
+    @Test
+    void goAskingForTheBackAgainStillReopensIt() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage", "PrimaryDocument/side2Image"), List.of("Side2Required")),
+                Set.of("document", "document#back-submitted"));
+
+        assertThat(interaction.captureType()).isEqualTo("document-back");
+    }
+
     // --- toRecord: module-level verdicts (mapModuleState) ---
 
     @Test

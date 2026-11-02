@@ -344,6 +344,14 @@ public class GoApiClient implements GoClient {
                     .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new java.util.LinkedHashSet<>()))
                     .add(submittedStage);
         }
+        // The back shares the document stage, so it is recorded separately:
+        // Go's next fetch can still say Side2Required (see
+        // DefaultInteractionMapper.side2Required).
+        if (payload.containsKey("documentBack")) {
+            mapper.secondSideMarker().ifPresent(marker -> completedStagesByInstance
+                    .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new java.util.LinkedHashSet<>()))
+                    .add(marker));
+        }
         // The submit response only acknowledges receipt; the next screen comes
         // from re-fetching the interaction, same as the mock's own response shape.
         return fetchInteraction(instanceId);
@@ -465,10 +473,11 @@ public class GoApiClient implements GoClient {
         // The back of the document, when Go has asked for it. Checked first:
         // by this point side 1 is submitted and the document stage counts as
         // completed, so the stage-based check below would read the capture as
-        // the selfie and overwrite the wrong element.
-        if (lastInstructionsByInstance.getOrDefault(instanceId, List.of()).stream()
-                        .anyMatch("Side2Required"::equalsIgnoreCase)
-                || outstanding.contains("PrimaryDocument/side2Image")) {
+        // the selfie and overwrite the wrong element. The same rule that chose
+        // the screen, so a back-of-document screen and the capture taken on it
+        // can't disagree.
+        boolean backSubmitted = mapper.secondSideMarker().map(completedStages(instanceId)::contains).orElse(false);
+        if (DefaultInteractionMapper.side2Required(outstanding, lastInstructionsByInstance.get(instanceId), backSubmitted)) {
             log.debug("Capture routed as DOCUMENT BACK: instance={} outstanding={}", instanceId, outstanding);
             Map<String, Object> back = new java.util.LinkedHashMap<>(data);
             back.remove("attachmentRef");
