@@ -2,7 +2,7 @@
 
 One of two implementations in this repo: this one integrates with GBG Go v2
 via the official Java Core SDK, `com.gbg:go-core-sdk` (alpha,
-`0.2.0-alpha01`). See `../api-implementation/` for the sibling built on
+`0.2.0-alpha02`). See `../api-implementation/` for the sibling built on
 hand-rolled HTTP, and the root `README.md` for how the two relate. The two
 serve the identical REST contract — a front end cannot tell which one it is
 talking to — and share every Go-agnostic package (`api/`, `session/`,
@@ -115,12 +115,13 @@ tenant shapes, it doesn't remove the need to configure for them:
 `GoProperties` for exactly this reason. `go.region` being one of `eu`/`us`/`au`
 with no `go.base-url` override maps onto `Go.builder().serverIndex(0/1/2)`.
 Otherwise (including every market profile here, and the fabric tenant) the
-SDK gets `Go.builder().serverURL(...)` with `go.base-url` minus its trailing
-`/v2/captain/`: since 0.2.0 the SDK adds that prefix to every operation path
-itself, so passing the full base URL would request
-`/v2/captain/v2/captain/...` (which Go answers with a misleading 401). Keep
-writing `go.base-url` the way the API reference documents it, with
-`/v2/captain/`; `GoSdkProperties.sdkServerUrl()` does the stripping.
+SDK gets `Go.builder().serverURL(...)` with `go.base-url`, `/v2/captain`
+included, minus its trailing slash. Since 0.2.0-alpha02 the SDK's server
+URLs carry `/v2/captain` and its operation paths start at `/journey/...`.
+alpha01 had it the other way round, and this module stripped the prefix to
+match; under alpha02 that would send every call to `https://host/journey/...`.
+Write `go.base-url` the way the API reference documents it, with
+`/v2/captain/`; `GoSdkProperties.sdkServerUrl()` only drops the trailing slash.
 
 ## API docs
 
@@ -307,6 +308,45 @@ classifies it as before (410 → session expired, and so on). For submit,
 other status, or a missing body, as an upstream failure, and the stage is
 not marked completed. Real Go errors arrive as HTTP 4XX/5XX and are handled
 by `call()`.
+
+## Upgrading to 0.2.0-alpha02
+
+Smaller than the alpha01 upgrade. Smoke-tested live on 2026-11-02 against
+Meridian Health on the public platform: a session started on the consent
+screen, and the interaction and state fetches both deserialized as the full
+view.
+
+- **Server URL.** `/v2/captain` moved back from the operation paths into the
+  server URLs; `GoSdkProperties.sdkServerUrl()` no longer strips it. See
+  "Two tenant shapes".
+- **Fetch and state variants are picked by `view`.** alpha01 chose the full
+  or slim variant by best field match, so a full-view fetch (no `context`)
+  came back as slim. alpha02 reads the response's `view` property, which the
+  API reference marks as required; Go sent it on every live call. A body
+  without `view` becomes the SDK's `Unknown…` variant, which `GoSdkClient`
+  reads as the full view (`asFullView`) after checking for an in-band error.
+- **`view` is required on the full models.** Building `InteractionFetchResponse`
+  or `StateFetchResponse` without it throws; `GoSdkClient.fromSlim` and the
+  test fixtures set `view(FULL)`.
+- **`StartJourneySubject` was renamed `StartJourneyContextSubject`**, with a
+  new `documentTypeSelection` field. Still no catch-all for extra properties,
+  so (e) is unchanged.
+- **Token errors.** A 400/401 from the token endpoint with a JSON body now
+  throws the new `OAuthErrorResponse`, a `GoException`, so it is classified
+  the same way as before.
+- **New: `testScenarios()`** manages a journey's test scenarios, and
+  `StartJourneyRequest` takes an inline `scenario` definition. The SDK has
+  no way to send the `x-gbg-scenario` header, so a saved scenario can't be
+  started by name through it. Not used here yet.
+- **SDK bug: `JourneyStartResponse.test()` is always `true`.** Its constructor
+  sets the field from a constant instead of the response, so a real journey
+  reports `test: true` too. Nothing here reads it; don't rely on it to tell
+  a test run from a real one.
+
+Unchanged from alpha01: (f) `SubmitInteractionRequest` has no catch-all,
+(g) the token path is still fixed at `/as/token.oauth2`, (h) the
+client-credentials scope is still the one-value enum, and (j)
+`InteractionSubmitResponse` still has no error code.
 
 ## Upgrading to 0.2.0-alpha01
 

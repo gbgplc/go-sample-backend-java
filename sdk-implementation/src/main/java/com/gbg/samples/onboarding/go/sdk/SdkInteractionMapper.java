@@ -6,7 +6,7 @@ import com.gbg.gocore.models.operations.Config;
 import com.gbg.gocore.models.operations.Participant;
 import com.gbg.gocore.models.operations.StartJourneyContext;
 import com.gbg.gocore.models.operations.StartJourneyRequest;
-import com.gbg.gocore.models.operations.StartJourneySubject;
+import com.gbg.gocore.models.operations.StartJourneyContextSubject;
 import com.gbg.gocore.utils.JSON;
 import com.gbg.gocore.models.operations.SubmitInteractionBiometric4;
 import com.gbg.gocore.models.operations.SubmitInteractionBiometricUnion;
@@ -139,7 +139,7 @@ public class SdkInteractionMapper {
      * client puts it.
      *
      * The prefill is subject-shaped ({@code identity}, {@code documents}, ...),
-     * so it is converted into the SDK's typed {@code StartJourneySubject}.
+     * so it is converted into the SDK's typed {@code StartJourneyContextSubject}.
      * That type has no catch-all for extra properties and the SDK's mapper
      * ignores unknown ones, so any key it has no field for is logged rather
      * than dropped silently; a prefill that does not fit the type at all is
@@ -149,13 +149,13 @@ public class SdkInteractionMapper {
         return new StartJourneyRequest(resourceId, new StartJourneyContext(toSubject(prefill), new Config("api")));
     }
 
-    private static StartJourneySubject toSubject(Map<String, Object> prefill) {
+    private static StartJourneyContextSubject toSubject(Map<String, Object> prefill) {
         if (prefill == null || prefill.isEmpty()) return null;
-        StartJourneySubject subject;
+        StartJourneyContextSubject subject;
         try {
-            subject = JSON.getMapper().convertValue(prefill, StartJourneySubject.class);
+            subject = JSON.getMapper().convertValue(prefill, StartJourneyContextSubject.class);
         } catch (IllegalArgumentException e) {
-            log.warn("Journey prefill does not fit the SDK's StartJourneySubject; starting without it (keys {})",
+            log.warn("Journey prefill does not fit the SDK's StartJourneyContextSubject; starting without it (keys {})",
                     prefill.keySet(), e);
             return null;
         }
@@ -163,7 +163,7 @@ public class SdkInteractionMapper {
         Set<String> dropped = new java.util.LinkedHashSet<>(prefill.keySet());
         dropped.removeIf(key -> sent.get(key) != null);
         if (!dropped.isEmpty()) {
-            log.warn("StartJourneySubject has no field for prefill keys {}; they are not sent", dropped);
+            log.warn("StartJourneyContextSubject has no field for prefill keys {}; they are not sent", dropped);
         }
         return subject;
     }
@@ -239,7 +239,7 @@ public class SdkInteractionMapper {
         boolean side1Submitted = documentStage.isPresent() && completed.contains(documentStage.get().name());
 
         if (documentStage.isPresent() && side1Submitted) {
-            if (side2Required(outstandingRaw, instructions)) {
+            if (side2Required(outstandingRaw, instructions, completed.contains(secondSideMarker(documentStage.get())))) {
                 return toStagedInteraction(interactionId, documentStage.get().asSecondSide(),
                         outstanding, completed, requiredRefs);
             }
@@ -426,11 +426,44 @@ public class SdkInteractionMapper {
                 && outstanding.stream().anyMatch("ManualReviewDecision"::equalsIgnoreCase);
     }
 
-    private static boolean side2Required(List<String> outstanding, List<String> instructions) {
+    /**
+     * Whether Go is waiting for the back of the document: it names
+     * {@code PrimaryDocument/side2Image} in {@code outstanding}, or instructs
+     * {@code Side2Required}.
+     *
+     * Once the back has been submitted the instruction alone no longer counts.
+     * The first fetch after that submit still says {@code Side2Required} while
+     * {@code outstanding} has already dropped {@code side2Image}; the next says
+     * {@code Side2Done} (live tenant, 2026-11-02, Meridian). Counting that stale
+     * instruction showed the back-of-document screen a second time, and the
+     * capture taken on it was then routed as the selfie, because by the submit
+     * Go said Side2Done. If Go wants the back again it names
+     * {@code side2Image} in {@code outstanding}, which still counts.
+     */
+    static boolean side2Required(List<String> outstanding, List<String> instructions, boolean backSubmitted) {
         if (outstanding != null && outstanding.contains("PrimaryDocument/side2Image")) {
             return true;
         }
-        return instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+        return !backSubmitted
+                && instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+    }
+
+    /**
+     * The entry {@code GoSdkClient} adds to an instance's completed stages once
+     * the back of the document is submitted. The back shares the document
+     * stage, so it has no stage name of its own; no screen-plan stage can
+     * have this name, so the stage logic ignores it.
+     */
+    static String secondSideMarker(ScreenPlanProperties.Stage documentStage) {
+        return documentStage.name() + "#back-submitted";
+    }
+
+    /** {@link #secondSideMarker} for this market's document stage; empty if it has none. */
+    public Optional<String> secondSideMarker() {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .map(SdkInteractionMapper::secondSideMarker);
     }
 
     private static boolean side2Undecided(List<String> instructions) {

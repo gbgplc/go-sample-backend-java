@@ -81,15 +81,17 @@ public record GoSdkProperties(
     }
 
     /**
-     * {@link #baseUrl} without the {@code /v2/captain} API path, for
-     * {@code Go.builder().serverURL(...)}. go-core-sdk 0.2.0 moved that prefix
-     * out of its server URLs and into every operation's path, so passing
-     * {@link #baseUrl} as-is would request {@code /v2/captain/v2/captain/...}.
-     * Any other path (a gateway prefix, say) is kept, since the SDK appends
-     * {@code /v2/captain/...} to it.
+     * {@link #baseUrl} for {@code Go.builder().serverURL(...)}: the full API
+     * base, {@code /v2/captain} included, without the trailing slash (every
+     * operation path starts with one).
+     *
+     * go-core-sdk 0.2.0-alpha02 put {@code /v2/captain} back into its server
+     * URLs and took it out of the operation paths, reversing alpha01. Under
+     * alpha01 this method stripped it; under alpha02 stripping it would send
+     * every call to {@code https://host/journey/...}.
      */
     public String sdkServerUrl() {
-        return baseUrl().replaceFirst("(?i)/v2/captain/$", "").replaceFirst("/$", "");
+        return baseUrl().replaceFirst("/$", "");
     }
 
     public boolean live() {

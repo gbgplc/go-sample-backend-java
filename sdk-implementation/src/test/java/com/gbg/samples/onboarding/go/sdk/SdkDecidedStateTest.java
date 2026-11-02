@@ -1,6 +1,7 @@
 package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.models.StateFetchResponse;
+import com.gbg.gocore.models.StateFetchResponseView;
 import com.gbg.samples.onboarding.api.dto.Decision;
 import com.gbg.samples.onboarding.api.dto.ModuleState;
 import com.gbg.samples.onboarding.api.dto.RecordResponse;
@@ -45,7 +46,7 @@ class SdkDecidedStateTest {
 
     private static StateFetchResponse stateWith(String outcome, String outcomeClassification,
                                                 List<Map<String, Object>> steps) {
-        return StateFetchResponse.builder()
+        return StateFetchResponse.builder().view(StateFetchResponseView.FULL)
                 .instanceId("i-1")
                 .status("InProgress")
                 .context(Map.of("process", Map.of("steps", steps)))
@@ -82,7 +83,7 @@ class SdkDecidedStateTest {
 
     @Test
     void noResultYetIsNotADecision() {
-        StateFetchResponse state = StateFetchResponse.builder()
+        StateFetchResponse state = StateFetchResponse.builder().view(StateFetchResponseView.FULL)
                 .instanceId("i-1")
                 .status("InProgress")
                 .build();
@@ -98,7 +99,7 @@ class SdkDecidedStateTest {
      */
     @Test
     void aFailedResultStatusBeatsAPositiveClassification() {
-        StateFetchResponse state = StateFetchResponse.builder()
+        StateFetchResponse state = StateFetchResponse.builder().view(StateFetchResponseView.FULL)
                 .instanceId("i-1")
                 .status("InProgress")
                 .context(Map.of("process", Map.of("steps", List.of(doneStep("Facematch Verification")))))
@@ -116,7 +117,7 @@ class SdkDecidedStateTest {
     /** The result of a deadlocked journey, from gbggo4-demo (2026-10-29, sandbox_QPgHrNztUswy5tZySLOUfe). */
     @Test
     void anAbandonedJourneyIsASystemErrorNotADecline() {
-        StateFetchResponse state = StateFetchResponse.builder()
+        StateFetchResponse state = StateFetchResponse.builder().view(StateFetchResponseView.FULL)
                 .instanceId("sandbox_QPgHrNztUswy5tZySLOUfe")
                 .status("InProgress")
                 .context(Map.of("process", Map.of("steps", List.of(doneStep("Document Classification")))))

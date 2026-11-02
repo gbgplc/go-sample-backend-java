@@ -3,7 +3,9 @@ package com.gbg.samples.onboarding.go.sdk;
 import com.gbg.gocore.Go;
 import com.gbg.gocore.models.InteractionFetchResponse;
 import com.gbg.gocore.models.InteractionFetchResponseJourney;
+import com.gbg.gocore.models.InteractionFetchResponseView;
 import com.gbg.gocore.models.SlimInteractionFetchResponse;
+import com.gbg.gocore.models.SlimStateFetchResponse;
 import com.gbg.gocore.models.InteractionSubmitResponse;
 import com.gbg.gocore.models.InteractionSubmitResponseStatus;
 import com.gbg.gocore.models.JourneyStartResponse;
@@ -23,6 +25,8 @@ import com.gbg.gocore.models.operations.StartJourneyResponse;
 import com.gbg.gocore.models.operations.SubmitInteractionRequest;
 import com.gbg.gocore.models.operations.SubmitInteractionResponse;
 import com.gbg.gocore.models.operations.SubmitInteractionSecurity;
+import com.gbg.gocore.models.operations.UnknownFetchInteractionResponseBody;
+import com.gbg.gocore.models.operations.UnknownGetJourneyStateResponseBody;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.JourneyStatus;
@@ -165,12 +169,20 @@ public class GoSdkClient implements GoClient {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
         }
 
-        // Either variant can arrive for the same full-view call: the SDK picks
-        // the union member whose declared fields best match the JSON, and Go's
-        // fetch response has no `context`, which only the full variant
-        // declares — so a typical response deserializes as the slim one.
-        Optional<InteractionFetchResponse> full = oneOf.interactionFetchResponse()
-                .or(() -> oneOf.slimInteractionFetchResponse().map(GoSdkClient::fromSlim));
+        // 0.2.0-alpha02 picks the union member by the response's `view`
+        // property ("full" or "slim"), which the API reference marks as
+        // required. A body without it arrives as UnknownFetchInteractionResponseBody:
+        // that is read as the full view this call asks for, unless it is an
+        // in-band error.
+        JsonNode json = oneOf instanceof UnknownFetchInteractionResponseBody unknown ? unknown.asJson() : null;
+        OnboardingException inBand = inBandError(json);
+        if (inBand != null) {
+            log.warn("GBG Go fetch-interaction returned an in-band error for instance {}: {}", instanceId, json);
+            throw inBand;
+        }
+        Optional<InteractionFetchResponse> full = oneOf instanceof InteractionFetchResponse fullView ? Optional.of(fullView)
+                : oneOf instanceof SlimInteractionFetchResponse slim ? Optional.of(fromSlim(slim))
+                : asFullView(json, InteractionFetchResponse.class, "fetch-interaction", instanceId);
         if (full.isPresent()) {
             InteractionFetchResponse body = full.get();
             // Always overwritten, empty when Go omits the field: keeping the
@@ -182,17 +194,16 @@ public class GoSdkClient implements GoClient {
             List<String> collectable = SdkInteractionMapper.collectableRefs(body);
             lastCollectableByInstance.put(instanceId, collectable.isEmpty() ? outstanding : collectable);
             Interaction interaction = mapper.toInteraction(body, completedStages(instanceId));
+            // Refs and instructions only, never values: enough to see why a
+            // screen was chosen.
+            log.debug("Fetched interaction: instance={} journey={} processing={} outstanding={} instructions={} "
+                            + "collectable={} completed={} -> screen kind={} stage={}",
+                    instanceId, body.journey().status(), body.processing().orElse(null), outstanding,
+                    lastInstructionsByInstance.get(instanceId), collectable, completedStages(instanceId),
+                    interaction.kind(), interaction.stage());
             return new SubmitInteractionResponseAlias(statusFrom(interaction), interaction);
         }
 
-        // asJson(): a shape neither variant matched — including an in-band
-        // error, which 0.1.0 modelled and 0.2.0 no longer does.
-        JsonNode json = oneOf.asJson().orElse(null);
-        OnboardingException inBand = inBandError(json);
-        if (inBand != null) {
-            log.warn("GBG Go fetch-interaction returned an in-band error for instance {}: {}", instanceId, json);
-            throw inBand;
-        }
         log.warn("Fetch-interaction response matched no expected shape for instance {}: {}", instanceId, json);
         throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
     }
@@ -210,9 +221,31 @@ public class GoSdkClient implements GoClient {
                 : OnboardingException.upstreamUnavailable("Something went wrong on our end. Try again shortly.");
     }
 
+    /**
+     * A response body that carried no {@code view} property, read as the full
+     * view: {@code view: "full"} is added and the body deserialized as
+     * {@code type}. Empty if it doesn't fit, or isn't an object. Logged
+     * either way, since it means Go's response no longer matches the API
+     * reference, which marks {@code view} as required.
+     */
+    static <T> Optional<T> asFullView(JsonNode json, Class<T> type, String operation, String instanceId) {
+        if (json == null || !json.isObject() || json.has("view")) return Optional.empty();
+        try {
+            T full = JSON.getMapper().treeToValue(((com.fasterxml.jackson.databind.node.ObjectNode) json.deepCopy())
+                    .put("view", "full"), type);
+            log.warn("GBG Go {} response for instance {} has no `view` property; read as the full view", operation, instanceId);
+            return Optional.of(full);
+        } catch (Exception e) {
+            log.warn("GBG Go {} response for instance {} has no `view` property and does not fit the full view: {}",
+                    operation, instanceId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     /** The slim variant's fields that the mapper reads, as the full variant. */
     static InteractionFetchResponse fromSlim(SlimInteractionFetchResponse slim) {
         return InteractionFetchResponse.builder()
+                .view(InteractionFetchResponseView.FULL)
                 .instanceId(slim.instanceId())
                 .interactionId(slim.interactionId().orElse(null))
                 .journey(new InteractionFetchResponseJourney(slim.journey().status().value()))
@@ -255,6 +288,14 @@ public class GoSdkClient implements GoClient {
             completedStagesByInstance
                     .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new LinkedHashSet<>()))
                     .add(submittedStage);
+        }
+        // The back shares the document stage, so it is recorded separately:
+        // Go's next fetch can still say Side2Required (see
+        // SdkInteractionMapper.side2Required).
+        if (payload.containsKey("documentBack")) {
+            mapper.secondSideMarker().ifPresent(marker -> completedStagesByInstance
+                    .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new LinkedHashSet<>()))
+                    .add(marker));
         }
         return fetchInteraction(instanceId);
     }
@@ -299,22 +340,27 @@ public class GoSdkClient implements GoClient {
         GetJourneyStateResponse response = call(() -> authorized(token -> currentGoClient(token).journeys()
                 .getState(null, GetJourneyStateRequestBody.builder().instanceId(instanceId).build())));
         GetJourneyStateResponseBody body = response.oneOf().orElse(null);
-        Optional<StateFetchResponse> full = body == null ? Optional.empty() : body.stateFetchResponse();
-        if (full.isPresent()) {
-            return full.get();
+        if (body instanceof StateFetchResponse full) {
+            return full;
         }
         // The slim variant has no per-step status or timing, so it cannot
-        // stand in for the full one. The SDK picks the union member by best
-        // field match, so a full-view body could in principle land here.
-        if (body != null && body.slimStateFetchResponse().isPresent()) {
-            log.warn("Journey-state response for instance {} deserialized as the SDK's slim variant, "
-                    + "which lacks the step detail the record needs: {}", instanceId, body.slimStateFetchResponse().get());
+        // stand in for the full one. Since alpha02 the SDK picks the variant
+        // by `view`, so this means Go itself answered with the slim view.
+        if (body instanceof SlimStateFetchResponse slim) {
+            log.warn("Journey-state response for instance {} is the slim view, "
+                    + "which lacks the step detail the record needs: {}", instanceId, slim);
         } else {
-            JsonNode json = body == null ? null : body.asJson().orElse(null);
+            // No `view` property: read as the full view this call asks for,
+            // unless it is an in-band error (see fetchInteractionInternal).
+            JsonNode json = body instanceof UnknownGetJourneyStateResponseBody unknown ? unknown.asJson() : null;
             OnboardingException inBand = inBandError(json);
             if (inBand != null) {
                 log.warn("GBG Go journey-state returned an in-band error for instance {}: {}", instanceId, json);
                 throw inBand;
+            }
+            Optional<StateFetchResponse> asFull = asFullView(json, StateFetchResponse.class, "journey-state", instanceId);
+            if (asFull.isPresent()) {
+                return asFull.get();
             }
             log.warn("Journey-state response matched no expected shape for instance {}: {}",
                     instanceId, json == null ? "no body" : json);
@@ -346,9 +392,10 @@ public class GoSdkClient implements GoClient {
         }
         List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
 
-        if (lastInstructionsByInstance.getOrDefault(instanceId, List.of()).stream()
-                        .anyMatch("Side2Required"::equalsIgnoreCase)
-                || outstanding.contains("PrimaryDocument/side2Image")) {
+        // The same rule that chose the screen, so a back-of-document screen
+        // and the capture taken on it can't disagree.
+        boolean backSubmitted = mapper.secondSideMarker().map(completedStages(instanceId)::contains).orElse(false);
+        if (SdkInteractionMapper.side2Required(outstanding, lastInstructionsByInstance.get(instanceId), backSubmitted)) {
             log.debug("Capture routed as DOCUMENT BACK: instance={} outstanding={}", instanceId, outstanding);
             Map<String, Object> back = new LinkedHashMap<>(data);
             back.remove("attachmentRef");

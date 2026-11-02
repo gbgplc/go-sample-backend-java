@@ -1,7 +1,7 @@
 package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.models.operations.StartJourneyRequest;
-import com.gbg.gocore.models.operations.StartJourneySubject;
+import com.gbg.gocore.models.operations.StartJourneyContextSubject;
 import com.gbg.samples.onboarding.config.ScreenPlanProperties;
 import org.junit.jupiter.api.Test;
 
@@ -16,7 +16,7 @@ class SdkStartRequestTest {
     private final SdkInteractionMapper mapper =
             new SdkInteractionMapper(new ScreenPlanProperties(List.of(), List.of()));
 
-    private static StartJourneySubject subjectOf(StartJourneyRequest request) {
+    private static StartJourneyContextSubject subjectOf(StartJourneyRequest request) {
         return request.context().subject().orElse(null);
     }
 
@@ -25,7 +25,7 @@ class SdkStartRequestTest {
         StartJourneyRequest request = mapper.toStartRequest("journey@v1", Map.of(
                 "identity", Map.of("firstName", "Ada", "lastNames", List.of("Lovelace"), "dateOfBirth", "1815-12-10")));
 
-        StartJourneySubject subject = subjectOf(request);
+        StartJourneyContextSubject subject = subjectOf(request);
         assertThat(request.resourceId()).isEqualTo("journey@v1");
         assertThat(request.context().config().delivery()).isEqualTo("api");
         assertThat(subject).isNotNull();

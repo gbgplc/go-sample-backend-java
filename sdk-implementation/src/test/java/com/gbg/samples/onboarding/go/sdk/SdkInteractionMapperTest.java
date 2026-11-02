@@ -2,7 +2,9 @@ package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.models.InteractionFetchResponse;
 import com.gbg.gocore.models.InteractionFetchResponseJourney;
+import com.gbg.gocore.models.InteractionFetchResponseView;
 import com.gbg.gocore.models.StateFetchResponse;
+import com.gbg.gocore.models.StateFetchResponseView;
 import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.ModuleState;
 import com.gbg.samples.onboarding.api.dto.RecordResponse;
@@ -83,7 +85,7 @@ class SdkInteractionMapperTest {
     /** Review finding 7: a Paused journey still lists outstanding elements but accepts no input. */
     @Test
     void aPausedJourneyShowsProcessingNotAnInputScreen() {
-        InteractionFetchResponse paused = InteractionFetchResponse.builder()
+        InteractionFetchResponse paused = InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
                 .instanceId("instance-1")
                 .interactionId("int-1")
                 .journey(new InteractionFetchResponseJourney("Paused"))
@@ -251,7 +253,7 @@ class SdkInteractionMapperTest {
     }
 
     private static InteractionFetchResponse fetchResponse(List<String> outstanding, List<String> instructions) {
-        return InteractionFetchResponse.builder()
+        return InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
                 .instanceId("instance-1")
                 .interactionId("int-1")
                 .journey(new InteractionFetchResponseJourney("InProgress"))
@@ -265,7 +267,7 @@ class SdkInteractionMapperTest {
 
     @Test
     void collectableRefsComeFromTheInteractionsCollectsInOrder() {
-        InteractionFetchResponse body = InteractionFetchResponse.builder()
+        InteractionFetchResponse body = InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
                 .instanceId("instance-1")
                 .journey(new InteractionFetchResponseJourney("InProgress"))
                 .interaction(Map.of("collects", List.of(
@@ -280,7 +282,7 @@ class SdkInteractionMapperTest {
 
     @Test
     void aFetchWithNoInteractionIsStillProcessing() {
-        InteractionFetchResponse body = InteractionFetchResponse.builder()
+        InteractionFetchResponse body = InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
                 .instanceId("instance-1")
                 .journey(new InteractionFetchResponseJourney("Completed"))
                 .build();
@@ -299,7 +301,7 @@ class SdkInteractionMapperTest {
     void nonStringEntriesAreSkippedRatherThanTurnedIntoJunkStrings() {
         assertThat(SdkInteractionMapper.stringList(List.of("a", Map.of("ref", "x"), 7))).containsExactly("a");
 
-        InteractionFetchResponse body = InteractionFetchResponse.builder()
+        InteractionFetchResponse body = InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
                 .instanceId("instance-1")
                 .journey(new InteractionFetchResponseJourney("InProgress"))
                 .interaction(Map.of("collects", List.of(
@@ -372,6 +374,33 @@ class SdkInteractionMapperTest {
         assertThat(interaction.stage()).isEqualTo("Biometrics");
     }
 
+    /**
+     * The first fetch after the back is submitted, as Go returned it on the
+     * live tenant (2026-11-02, Meridian): side2Image already gone from
+     * outstanding, the instruction not yet updated. The back screen used to
+     * open again, and the capture taken on it went to Go as the selfie.
+     */
+    @Test
+    void aStaleSide2RequiredAfterTheBackIsSubmittedMovesOnToTheSelfie() {
+        Set<String> backSubmitted = Set.of("document", "document#back-submitted");
+
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage"), List.of("Side2Required")), backSubmitted);
+
+        assertThat(interaction.stage()).isEqualTo("Biometrics");
+        assertThat(mapper.secondSideMarker()).contains("document#back-submitted");
+    }
+
+    /** A back Go rejects comes back as side2Image outstanding, which still reopens the back screen. */
+    @Test
+    void goAskingForTheBackAgainStillReopensIt() {
+        Interaction interaction = mapper.toInteraction(
+                fetchResponse(List.of("Selfie/selfieImage", "PrimaryDocument/side2Image"), List.of("Side2Required")),
+                Set.of("document", "document#back-submitted"));
+
+        assertThat(interaction.captureType()).isEqualTo("document-back");
+    }
+
     // ------------------------------------------------------------------
     // toRecord: module-level verdicts (mapModuleState) — built from the
     // untyped `data` map, see class javadoc.
@@ -429,7 +458,7 @@ class SdkInteractionMapperTest {
         Map<String, Object> process = new LinkedHashMap<>();
         if (steps != null) process.put("steps", steps);
         if (journeyMap != null) process.put("journey", journeyMap);
-        return StateFetchResponse.builder()
+        return StateFetchResponse.builder().view(StateFetchResponseView.FULL)
                 .instanceId("instance-1")
                 .status(status)
                 .context(Map.of("process", process))
