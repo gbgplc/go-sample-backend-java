@@ -112,4 +112,23 @@ class SdkDecidedStateTest {
         assertThat(record.systemError()).isTrue();
         assertThat(record.title()).isEqualTo("We could not run your checks");
     }
+
+    /** The result of a deadlocked journey, from gbggo4-demo (2026-10-29, sandbox_QPgHrNztUswy5tZySLOUfe). */
+    @Test
+    void anAbandonedJourneyIsASystemErrorNotADecline() {
+        StateFetchResponse state = StateFetchResponse.builder()
+                .instanceId("sandbox_QPgHrNztUswy5tZySLOUfe")
+                .status("InProgress")
+                .context(Map.of("process", Map.of("steps", List.of(doneStep("Document Classification")))))
+                .result(Map.of("status", "abandoned", "errors",
+                        List.of(Map.of("code", "MODULE_DECLARED_OUTPUT_MISSING"), Map.of("code", "JOURNEY_ABANDONED"))))
+                .build();
+
+        RecordResponse record = mapper.toRecord(state);
+
+        assertThat(mapper.resultFailed(state)).isTrue();
+        assertThat(record.decision()).isEqualTo(Decision.FAIL);
+        assertThat(record.systemError()).isTrue();
+        assertThat(record.title()).isEqualTo("We could not run your checks");
+    }
 }

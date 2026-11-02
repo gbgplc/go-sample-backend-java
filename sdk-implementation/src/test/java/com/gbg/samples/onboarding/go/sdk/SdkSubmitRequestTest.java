@@ -83,8 +83,30 @@ class SdkSubmitRequestTest {
 
         JsonNode wire = wire(data);
 
-        assertThat(participants(wire)).containsExactly("CurrentAddress");
+        assertThat(participants(wire)).containsExactly("PreviousAddresses", "CurrentAddress");
         assertThat(wire.at("/context/subject/identity/currentAddress/postalCode").asText()).isEqualTo("SW1A 2AA");
+        assertThat(wire.at("/context/subject/identity/previousAddresses/0/postalCode").asText()).isEqualTo("OX1 1AA");
+    }
+
+    /** Each used to match nothing and be dropped. */
+    @Test
+    void aPreviousAddressesComponentsLandTogetherInItsOwnEntry() throws Exception {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("PreviousAddresses/building", "1");
+        data.put("PreviousAddresses/postalCode", "OX1 1AA");
+        data.put("PreviousAddresses/country", "United Kingdom");
+
+        JsonNode wire = wire(data);
+        Map<String, String> paths = mapper.fieldsByGoPath(data);
+
+        assertThat(participants(wire)).containsOnly("PreviousAddresses");
+        JsonNode previous = wire.at("/context/subject/identity/previousAddresses");
+        assertThat(previous.size()).isEqualTo(1);
+        assertThat(previous.at("/0/building").asText()).isEqualTo("1");
+        assertThat(previous.at("/0/postalCode").asText()).isEqualTo("OX1 1AA");
+        assertThat(previous.at("/0/country").asText()).isEqualTo("GBR");
+        paths.keySet().forEach(path ->
+                assertThat(wire.at("/" + path.replace('.', '/')).isMissingNode()).as(path).isFalse());
     }
 
     /** The error body is the one Go actually returned for two bad emails (live tenant, 2026-09-29). */

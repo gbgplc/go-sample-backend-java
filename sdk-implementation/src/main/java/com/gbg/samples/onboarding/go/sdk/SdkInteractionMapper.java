@@ -602,12 +602,14 @@ public class SdkInteractionMapper {
      * module's terminal error, or the platform abandoning it on a deadlock or
      * timeout), leaving a positive classification beside {@code status:
      * "error"} — and that is not a pass. Go reports an elapsed deadline as
-     * {@code error} today; {@code timeout} is accepted too.
+     * {@code error} today; {@code timeout} is accepted too. A deadlocked
+     * journey reports {@code abandoned} (gbggo4-demo, 2026-10-29).
      */
     public boolean resultFailed(StateFetchResponse state) {
         Object status = state.result().map(result -> result.get("status")).orElse(null);
         return status != null
-                && ("error".equalsIgnoreCase(status.toString()) || "timeout".equalsIgnoreCase(status.toString()));
+                && ("error".equalsIgnoreCase(status.toString()) || "timeout".equalsIgnoreCase(status.toString())
+                        || "abandoned".equalsIgnoreCase(status.toString()));
     }
 
     /** Terminal check for {@code GoSdkClient.fetchState}: has Go reached a decision yet? */
@@ -961,6 +963,8 @@ public class SdkInteractionMapper {
         String gender;
         String mothersMaidenName;
         final Map<String, String> addressComponents = new LinkedHashMap<>();
+        /** Components of one previous address, built into the first previousAddresses[] entry. */
+        final Map<String, String> previousAddressComponents = new LinkedHashMap<>();
         final List<SubmitInteractionIdentityPhone> phones = new ArrayList<>();
         final List<SubmitInteractionIdentityEmail> emails = new ArrayList<>();
         final List<SubmitInteractionIdentityIdNumber> idNumbers = new ArrayList<>();
@@ -969,7 +973,28 @@ public class SdkInteractionMapper {
         boolean hasAnyValue() {
             return firstName != null || lastNames != null || dateOfBirth != null || gender != null
                     || mothersMaidenName != null || !addressComponents.isEmpty() || !phones.isEmpty()
-                    || !emails.isEmpty() || !idNumbers.isEmpty() || !previousAddresses.isEmpty();
+                    || !emails.isEmpty() || !idNumbers.isEmpty() || !previousAddresses.isEmpty()
+                    || !previousAddressComponents.isEmpty();
+        }
+
+        private static SubmitInteractionIdentityPreviousAddress previousAddress(Map<String, String> components) {
+            SubmitInteractionIdentityPreviousAddress.Builder addr = SubmitInteractionIdentityPreviousAddress.builder();
+            components.forEach((component, val) -> {
+                switch (component) {
+                    case "premise" -> addr.premise(val);
+                    case "subBuilding" -> addr.subBuilding(val);
+                    case "building" -> addr.building(val);
+                    case "thoroughfare" -> addr.thoroughfare(val);
+                    case "dependentThoroughfare" -> addr.dependentThoroughfare(val);
+                    case "locality" -> addr.locality(val);
+                    case "dependentLocality" -> addr.dependentLocality(val);
+                    case "postalCode" -> addr.postalCode(val);
+                    case "country" -> addr.country(countryCode(val));
+                    case "addressString" -> addr.addressString(val);
+                    default -> log.debug("Unmapped previous-address component {} — dropped", component);
+                }
+            });
+            return addr.build();
         }
 
         SubmitInteractionIdentity build() {
@@ -1001,7 +1026,13 @@ public class SdkInteractionMapper {
             if (!phones.isEmpty()) b.phones(phones);
             if (!emails.isEmpty()) b.emails(emails);
             if (!idNumbers.isEmpty()) b.idNumbers(idNumbers);
-            if (!previousAddresses.isEmpty()) b.previousAddresses(previousAddresses);
+            if (!previousAddressComponents.isEmpty() || !previousAddresses.isEmpty()) {
+                // The components' entry first, at the index apply() reported for them.
+                List<SubmitInteractionIdentityPreviousAddress> all = new ArrayList<>();
+                if (!previousAddressComponents.isEmpty()) all.add(previousAddress(previousAddressComponents));
+                all.addAll(previousAddresses);
+                b.previousAddresses(all);
+            }
             return b.build();
         }
     }
@@ -1036,7 +1067,7 @@ public class SdkInteractionMapper {
         private enum Target {
             FIRST_NAME, LAST_NAMES, DATE_OF_BIRTH, GENDER, MOTHERS_MAIDEN_NAME,
             ADDRESS_COMPONENT, PHONE_MOBILE, PHONE_LANDLINE, EMAIL_PERSONAL, EMAIL_WORK,
-            ID_NUMBER_NI, ID_NUMBER_SSN, PREVIOUS_ADDRESS,
+            ID_NUMBER_NI, ID_NUMBER_SSN, PREVIOUS_ADDRESS, PREVIOUS_ADDRESS_COMPONENT,
             DOCUMENT_SIDE1, DOCUMENT_SIDE2, SELFIE, DROPPED
         }
 
@@ -1092,12 +1123,20 @@ public class SdkInteractionMapper {
          * Leaf names repeat across elements ({@code PreviousAddresses/postalCode}
          * and {@code CurrentAddress/postalCode}), and matching on the leaf alone
          * would write a previous address's postcode over the current one.
+         *
+         * A previous-address component goes into the first
+         * {@code previousAddresses[]} entry instead, with every other component
+         * of the same address. Without this it matched nothing and was dropped.
          */
         static FieldMapping forKey(String key) {
             FieldMapping known = KNOWN.get(key);
             if (known == null && key.contains("/")) {
+                String element = key.substring(0, key.indexOf('/'));
                 FieldMapping byLeaf = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
-                if (byLeaf != null && byLeaf.domainElementId().equals(key.substring(0, key.indexOf('/')))) {
+                if ("PreviousAddresses".equals(element) && byLeaf != null && byLeaf.target() == Target.ADDRESS_COMPONENT) {
+                    return new FieldMapping(element, Target.PREVIOUS_ADDRESS_COMPONENT, byLeaf.addressComponent());
+                }
+                if (byLeaf != null && byLeaf.domainElementId().equals(element)) {
                     known = byLeaf;
                 }
             }
@@ -1154,6 +1193,10 @@ public class SdkInteractionMapper {
                     identity.previousAddresses.add(
                             SubmitInteractionIdentityPreviousAddress.builder().addressString(text).build());
                     return id + "previousAddresses." + (identity.previousAddresses.size() - 1) + ".addressString";
+                }
+                case PREVIOUS_ADDRESS_COMPONENT -> {
+                    identity.previousAddressComponents.put(addressComponent, text);
+                    return id + "previousAddresses.0." + addressComponent;
                 }
                 case DOCUMENT_SIDE1 -> { mergeDocument(documents, true, text); return "context.subject.documents.0.side1Image"; }
                 case DOCUMENT_SIDE2 -> { mergeDocument(documents, false, text); return "context.subject.documents.0.side2Image"; }
