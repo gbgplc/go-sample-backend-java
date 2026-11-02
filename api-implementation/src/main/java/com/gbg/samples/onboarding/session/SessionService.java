@@ -8,12 +8,15 @@ import com.gbg.samples.onboarding.api.dto.RecordResponse;
 import com.gbg.samples.onboarding.api.dto.StartSessionResponse;
 import com.gbg.samples.onboarding.api.dto.StateResponse;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionResponse;
+import com.gbg.samples.onboarding.api.dto.SummaryRow;
 import com.gbg.samples.onboarding.config.AppConfigProperties;
 import com.gbg.samples.onboarding.go.GoClient;
 import com.gbg.samples.onboarding.go.GoStartResult;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -46,7 +49,8 @@ public class SessionService {
         String cookieToken = UUID.randomUUID().toString();
         String initialInteractionId = result.interaction() == null ? null : result.interaction().interactionId();
 
-        Session session = new Session(sessionId, cookieToken, result.instanceId(), initialInteractionId);
+        Session session = new Session(sessionId, cookieToken, result.instanceId(), initialInteractionId,
+                result.testScenario());
         sessionStore.save(session);
 
         return new Started(new StartSessionResponse(sessionId, result.status(), result.interaction()), cookieToken);
@@ -153,9 +157,23 @@ public class SessionService {
         return goClient.fetchState(session.goInstanceId());
     }
 
+    /**
+     * A test run's record says so, with the scenario that produced it, so a
+     * scenario's outcome is never mistaken for a real verification. A summary
+     * row, so neither the response shape nor the front end changes.
+     */
     public RecordResponse getRecord(String sessionId, String cookieToken) {
         Session session = authorize(sessionId, cookieToken);
-        return goClient.fetchRecord(session.goInstanceId());
+        RecordResponse record = goClient.fetchRecord(session.goInstanceId());
+        if (session.testScenario() == null) {
+            return record;
+        }
+        List<SummaryRow> summary = new ArrayList<>();
+        summary.add(new SummaryRow("Test run", "Yes, scenario " + session.testScenario()));
+        if (record.summary() != null) {
+            summary.addAll(record.summary());
+        }
+        return record.withSummary(List.copyOf(summary));
     }
 
     /**

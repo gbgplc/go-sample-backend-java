@@ -76,7 +76,10 @@ public class SessionController {
     @PostMapping("/v1/sessions")
     public StartSessionResponse startSession(
             @RequestBody(required = false) StartSessionRequest request,
-            @Parameter(description = "Mock-mode only — jumps straight to a named scenario (e.g. 'refer', 'denied'). Ignored by a live Go client.")
+            @Parameter(description = "Picks the scenario a journey runs. Mock mode: a scripted outcome (e.g. 'refer', "
+                    + "'denied'). Test-scenarios mode: the GBG Go test scenario to start on, overriding the market's "
+                    + "default; a name that isn't letters, numbers, _ and -, up to 64 characters, is refused with a "
+                    + "400. Ignored in live mode.")
             @RequestParam(name = "mock_scenario", required = false) String scenarioHint,
             HttpServletRequest httpRequest,
             HttpServletResponse response

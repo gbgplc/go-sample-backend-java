@@ -12,7 +12,7 @@ class GoTokenServiceTest {
 
     private static GoProperties props(String grantType, String clientId, String secret, String username, String password) {
         return new GoProperties("live", "eu", "https://auth.test", "gbg.token", grantType,
-                clientId, secret, username, password, null);
+                clientId, secret, username, password, null, null);
     }
 
     @Test

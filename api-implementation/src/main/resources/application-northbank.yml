@@ -36,6 +36,11 @@ go:
   scope: gbg.token
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
+  # go.mode=test-scenarios only: the GBG Go test scenario a journey starts on
+  # when the app is opened without ?mock_scenario=<name>. It must be saved on
+  # this market's journey (Journey builder -> Test Scenarios); none exist yet,
+  # so this is the suggested name for the pass scenario.
+  test-scenario: northbank-pass
 
 # Live-mode screens for this journey (DefaultInteractionMapper): which domain
 # element each screen collects, in collection order.

@@ -31,9 +31,15 @@ app:
     - http://localhost:3000
 
 go:
+  # mock: canned fixtures, no credentials or network.
+  # test-scenarios: real GBG Go, every journey started on a named test scenario
+  #   (no live checks, no verification charges) — see go.test-scenario in each
+  #   market's application-<market>.yml.
+  # live: real GBG Go with real checks.
   mode: mock
   region: eu
-  # Only read when go.mode=live — never commit real values, set via env vars.
+  # Only read when go.mode is live or test-scenarios — never commit real
+  # values, set via env vars.
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
   # Password grant only (the nonprod fabric tenants) — ignored under

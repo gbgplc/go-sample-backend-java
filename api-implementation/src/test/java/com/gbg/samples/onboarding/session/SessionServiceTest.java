@@ -1,16 +1,21 @@
 package com.gbg.samples.onboarding.session;
 
 import com.gbg.samples.onboarding.api.OnboardingException;
+import com.gbg.samples.onboarding.api.dto.Decision;
 import com.gbg.samples.onboarding.api.dto.ErrorCode;
 import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.JourneyStatus;
+import com.gbg.samples.onboarding.api.dto.RecordResponse;
 import com.gbg.samples.onboarding.api.dto.ScreenKind;
 import com.gbg.samples.onboarding.api.dto.SubmitInteractionResponse;
+import com.gbg.samples.onboarding.api.dto.SummaryRow;
 import com.gbg.samples.onboarding.config.AppConfigProperties;
 import com.gbg.samples.onboarding.config.SessionProperties;
 import com.gbg.samples.onboarding.go.GoClient;
+import com.gbg.samples.onboarding.go.GoStartResult;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,5 +80,43 @@ class SessionServiceTest {
         service.submitInteraction("s1", "cookie", "int-9", Map.of("MothersMaidenName", "Smith"));
 
         verify(go).submitInteraction("instance-1", "int-9", Map.of("MothersMaidenName", "Smith"));
+    }
+
+    private static RecordResponse passRecord() {
+        return new RecordResponse(Decision.PASS, "Verification complete", "", "Your identity has been verified.", "Done",
+                List.of(), List.of(new SummaryRow("Reference", "sandbox_abc")), null, false);
+    }
+
+    /** A scenario's outcome must never read as a real verification. */
+    @Test
+    void aTestRunsRecordNamesItsScenario() {
+        store.save(new Session("s1", "cookie", "sandbox_abc", null, "northbank-pass"));
+        when(go.fetchRecord("sandbox_abc")).thenReturn(passRecord());
+
+        RecordResponse record = service.getRecord("s1", "cookie");
+
+        assertThat(record.summary()).containsExactly(
+                new SummaryRow("Test run", "Yes, scenario northbank-pass"),
+                new SummaryRow("Reference", "sandbox_abc"));
+    }
+
+    @Test
+    void aRealRunsRecordHasNoTestRow() {
+        store.save(new Session("s1", "cookie", "instance-1", null));
+        when(go.fetchRecord("instance-1")).thenReturn(passRecord());
+
+        assertThat(service.getRecord("s1", "cookie").summary()).noneMatch(row -> row.k().equals("Test run"));
+    }
+
+    @Test
+    void theStartedScenarioIsKeptWithTheSession() {
+        AppConfigProperties appConfig = mock(AppConfigProperties.class);
+        when(appConfig.resourceId()).thenReturn("journey@v1");
+        when(go.startJourney("journey@v1", null, null))
+                .thenReturn(new GoStartResult("sandbox_abc", JourneyStatus.IN_PROGRESS, null, "northbank-pass"));
+
+        String sessionId = new SessionService(go, store, appConfig).startSession(null, null).body().sessionId();
+
+        assertThat(store.find(sessionId)).get().extracting(Session::testScenario).isEqualTo("northbank-pass");
     }
 }

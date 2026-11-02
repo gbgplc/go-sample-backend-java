@@ -19,6 +19,12 @@ public final class Session {
     private final String cookieToken;
     private final String goInstanceId;
     private final Instant createdAt;
+    /**
+     * The GBG Go test scenario this session's journey runs on, or null for a
+     * real run. Kept here, not in a per-instance cache, so it lives exactly as
+     * long as the session whose record it labels.
+     */
+    private final String testScenario;
 
     private volatile String currentInteractionId;
     private volatile String lastSubmittedInteractionId;
@@ -30,10 +36,15 @@ public final class Session {
     private volatile Instant lastAccessedAt;
 
     public Session(String id, String cookieToken, String goInstanceId, String initialInteractionId) {
+        this(id, cookieToken, goInstanceId, initialInteractionId, null);
+    }
+
+    public Session(String id, String cookieToken, String goInstanceId, String initialInteractionId, String testScenario) {
         this.id = id;
         this.cookieToken = cookieToken;
         this.goInstanceId = goInstanceId;
         this.currentInteractionId = initialInteractionId;
+        this.testScenario = testScenario;
         this.createdAt = Instant.now();
         this.lastAccessedAt = this.createdAt;
     }
@@ -48,6 +59,10 @@ public final class Session {
 
     public String goInstanceId() {
         return goInstanceId;
+    }
+
+    public String testScenario() {
+        return testScenario;
     }
 
     public Instant createdAt() {
