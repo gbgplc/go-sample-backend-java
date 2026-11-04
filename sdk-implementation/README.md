@@ -1,8 +1,7 @@
 # Onboarding service (Java) — SDK implementation
 
 One of two implementations in this repo: this one integrates with GBG Go v2
-via the official Java Core SDK, `com.gbg:go-core-sdk` (alpha,
-`0.2.0-alpha02`). See `../api-implementation/` for the sibling built on
+via the official Java Core SDK, `com.gbg:go-core-sdk` (`0.2.0`). See `../api-implementation/` for the sibling built on
 hand-rolled HTTP, and the root `README.md` for how the two relate. The two
 serve the identical REST contract — a front end cannot tell which one it is
 talking to — and share every Go-agnostic package (`api/`, `session/`,
@@ -309,6 +308,23 @@ other status, or a missing body, as an upstream failure, and the stage is
 not marked completed. Real Go errors arrive as HTTP 4XX/5XX and are handled
 by `call()`.
 
+## Upgrading to 0.2.0
+
+A drop-in upgrade from alpha02: no code changes, and all 129 tests pass
+unchanged. Comparing the two sources jars, only two files differ:
+
+- **`JourneyStartResponse.test()` is fixed.** It now returns
+  `Optional<Boolean>` read from the response instead of a constant `true`,
+  so it can tell a test run from a real one. Nothing here reads it yet.
+- `SDKConfiguration`'s version strings.
+
+Still unchanged: (e) and (f) no catch-all on the start subject or the submit
+request, (g) the token path is fixed at `/as/token.oauth2`, (h) the
+client-credentials scope is the one-value enum, and (j)
+`InteractionSubmitResponse` has no error code. `journeys().start()` still
+cannot send the `x-gbg-scenario` header, so a saved test scenario can't be
+started by name through the SDK.
+
 ## Upgrading to 0.2.0-alpha02
 
 Smaller than the alpha01 upgrade. Smoke-tested live on 2026-11-02 against
@@ -338,7 +354,7 @@ view.
   `StartJourneyRequest` takes an inline `scenario` definition. The SDK has
   no way to send the `x-gbg-scenario` header, so a saved scenario can't be
   started by name through it. Not used here yet.
-- **SDK bug: `JourneyStartResponse.test()` is always `true`.** Its constructor
+- **SDK bug (fixed in 0.2.0): `JourneyStartResponse.test()` is always `true`.** Its constructor
   sets the field from a constant instead of the response, so a real journey
   reports `test: true` too. Nothing here reads it; don't rely on it to tell
   a test run from a real one.
