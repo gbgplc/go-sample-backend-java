@@ -1,6 +1,7 @@
 package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.models.errors.APIException;
+import com.gbg.gocore.models.errors.ErrorResponse;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.ErrorCode;
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,28 @@ class GoSdkClientTokenRetryTest {
         String result = client.authorized(token -> {
             seen.add(token);
             if (token.equals("stale")) throw apiException(401);
+            return "ok";
+        });
+
+        assertThat(result).isEqualTo("ok");
+        assertThat(seen).containsExactly("stale", "fresh");
+        verify(auth).invalidate("stale");
+    }
+
+    /**
+     * 0.2.0 throws {@code ErrorResponse} — a {@code GoException} but not an
+     * {@code APIException} — for Go's documented error codes, 401 included.
+     */
+    @Test
+    void aRejectedTokenReportedAsTheTypedErrorResponseIsAlsoRetried() {
+        when(auth.accessToken()).thenReturn("stale", "fresh");
+        List<String> seen = new ArrayList<>();
+
+        String result = client.authorized(token -> {
+            seen.add(token);
+            if (token.equals("stale")) {
+                throw new ErrorResponse(401, null, mock(HttpResponse.class), null, null);
+            }
             return "ok";
         });
 

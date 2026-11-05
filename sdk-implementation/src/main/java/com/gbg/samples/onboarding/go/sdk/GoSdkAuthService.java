@@ -6,7 +6,7 @@ import com.gbg.gocore.models.ClientCredentialsGrantRequestGrantType;
 import com.gbg.gocore.models.PasswordGrantRequest;
 import com.gbg.gocore.models.PasswordGrantRequestGrantType;
 import com.gbg.gocore.models.Scope;
-import com.gbg.gocore.models.errors.APIException;
+import com.gbg.gocore.models.errors.GoException;
 import com.gbg.gocore.models.operations.PostAsTokenOauth2Request;
 import com.gbg.gocore.models.operations.PostAsTokenOauth2Response;
 import com.gbg.gocore.models.operations.PostAsTokenOauth2ResponseBody;
@@ -37,20 +37,18 @@ import java.time.Instant;
  * {@code REFRESH_MARGIN_SECONDS}, synchronized mint-on-demand — is ported
  * near-verbatim, because nothing in the SDK auto-refreshes a token for you.
  *
- * <p><b>Known limitation, unverified against a live fabric tenant</b> (see
- * {@code GoSdkProperties}'s javadoc and this module's README "Known gaps"):
+ * <p><b>Known limitation</b> (see {@code GoSdkProperties}'s javadoc and this
+ * module's README "Known gaps" (g)):
  * {@code tokens().generate(request, serverURL)}'s {@code serverURL} parameter
  * only overrides the scheme+host the SDK talks to — the request path itself is
  * hardcoded to {@code /as/token.oauth2} inside the generated
  * {@code PostAsTokenOauth2} operation class. That is exactly the public
  * platform's PingFederate path, so client_credentials against
- * {@code api.auth.gbgplc.com} works as expected. Whether the fabric nonprod
- * tenant's Keycloak realm also exposes its token endpoint at that literal path
- * is not something static reading of the SDK source can answer — if it
- * doesn't, minting under the password grant will fail with a 404 from the
- * SDK's own client regardless of what {@code go.auth-url} is configured to,
- * and the fix is outside this service (there is no code-level workaround
- * given the SDK's fixed path).
+ * {@code api.auth.gbgplc.com} works as expected. A fabric nonprod tenant's
+ * Keycloak realm is at another path, so minting there fails with a 404
+ * whatever {@code go.auth-url} says (confirmed on gbggo4-demo). There is no
+ * code-level workaround given the SDK's fixed path; the constructor logs the
+ * misconfiguration at startup instead of leaving the first customer to find it.
  */
 @Component
 @ConditionalOnProperty(prefix = "go", name = "mode", havingValue = "live")
@@ -87,6 +85,10 @@ public class GoSdkAuthService {
 
     public GoSdkAuthService(GoSdkProperties properties) {
         requireCredentials(properties);
+        String authUrlProblem = properties.authUrlProblem();
+        if (authUrlProblem != null) {
+            log.error("Misconfigured: {}. Every token mint will fail.", authUrlProblem);
+        }
         this.properties = properties;
         // TimeoutHttpClient: the SDK's default client has no timeout at all
         // (see its own javadoc) — without this, a stalled token endpoint
@@ -168,7 +170,10 @@ public class GoSdkAuthService {
             cachedToken = body.accessToken().orElseThrow();
             cachedTokenExpiresAt = Instant.now().plusSeconds(cacheSeconds(body.expiresIn().orElse(null)));
             return cachedToken;
-        } catch (APIException e) {
+        } catch (GoException e) {
+            // GoException, not just APIException: a 400/401 with a JSON body
+            // arrives as OAuthErrorResponse, which is a GoException but not
+            // an APIException, and its status and body are what say why.
             log.error("Failed to mint a Go access token: {} {}", e.code(), e.bodyAsString().orElse(""), e);
             throw OnboardingException.upstreamUnavailable("Could not authenticate with the identity platform. Try again shortly.");
         } catch (OnboardingException e) {

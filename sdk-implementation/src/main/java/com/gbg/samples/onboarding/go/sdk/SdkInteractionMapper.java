@@ -1,18 +1,13 @@
 package com.gbg.samples.onboarding.go.sdk;
 
-import com.gbg.gocore.models.operations.Collect1;
-import com.gbg.gocore.models.operations.Collect2;
-import com.gbg.gocore.models.operations.CollectUnion;
+import com.gbg.gocore.models.InteractionFetchResponse;
+import com.gbg.gocore.models.StateFetchResponse;
 import com.gbg.gocore.models.operations.Config;
-import com.gbg.gocore.models.operations.Delivery;
-import com.gbg.gocore.models.operations.GetJourneyStateClassification;
-import com.gbg.gocore.models.operations.GetJourneyStateDocument;
-import com.gbg.gocore.models.operations.GetJourneyStateResponseBody;
 import com.gbg.gocore.models.operations.Participant;
-import com.gbg.gocore.models.operations.ResponseBody1;
 import com.gbg.gocore.models.operations.StartJourneyContext;
 import com.gbg.gocore.models.operations.StartJourneyRequest;
-import com.gbg.gocore.models.operations.StartJourneySubject;
+import com.gbg.gocore.models.operations.StartJourneyContextSubject;
+import com.gbg.gocore.utils.JSON;
 import com.gbg.gocore.models.operations.SubmitInteractionBiometric4;
 import com.gbg.gocore.models.operations.SubmitInteractionBiometricUnion;
 import com.gbg.gocore.models.operations.SubmitInteractionConsent;
@@ -60,55 +55,25 @@ import java.util.Set;
  * selection, the document/side-2 handling, the outcome classification) is
  * ported structurally unchanged; only the Go-response-shaped inputs differ.
  *
- * <h2>What actually changed shape, per the spike (see
- * {@code docs/sdk-jar-inspection/FINDINGS.md})</h2>
+ * <h2>Response shapes in go-core-sdk 0.2.0</h2>
  * <ul>
- *   <li>{@code collects} is now a typed {@code List<CollectUnion>}
- *       (wrapping {@code Collect1}/{@code Collect2}: {@code ref}/{@code spec}/
- *       {@code recommended}, {@code Collect2} adding a combinator/inputs pair
- *       not used by anything this mapper reads) rather than a raw
- *       {@code List<Map<String,Object>>} — same {@code ref}/{@code spec}
- *       fields, same "required" semantics, just accessed through generated
- *       accessors instead of map lookups.</li>
- *   <li>{@code journeys().getState()}'s {@code GetJourneyStateResponseBody}
- *       has <b>no</b> top-level {@code result} field and its typed
- *       {@code context} wraps only {@code subject} (the extracted identity/
- *       document/biometric domain model) — there is no typed home anywhere in
- *       the generated model for per-module timing
- *       ({@code durationMilliSec}/{@code endedAt}), per-module
- *       outcome/outcomeClassification, or the journey-level decision
- *       classification. This was flagged in FINDINGS.md Q3 as unverified, and
- *       verified live 2026-09-18: the SDK's shared {@code ObjectMapper}
- *       ({@code com.gbg.gocore.utils.JSON}) is configured with
- *       {@code FAIL_ON_UNKNOWN_PROPERTIES = false}, so the wire JSON's
- *       top-level {@code steps} and {@code result} keys — which the old
- *       raw-HTTP {@code GoStateResponse} record declared and read directly —
- *       have no field to land in on this generated class and are silently
- *       discarded. They never reach {@code data} either: a live capture of
- *       every {@code journey/state/fetch} response for a real instance came
- *       back {@code data={}} every time, {@code context} populated. This is
- *       a genuine gap in the SDK's current (alpha) response model for this
- *       operation, not a wrong guess about where to look.
- *
- *       <p>The fix ({@link GoSdkClient}, via {@link RawStateBodyCapturingHttpClient})
- *       buffers the exact wire bytes of the {@code journey/state/fetch}
- *       response as the SDK's own {@link com.gbg.gocore.utils.SpeakeasyHTTPClient}
- *       sends them — no separate network call — and parses that buffer
- *       itself with a plain {@code ObjectMapper}, the same way
- *       {@code GoStateResponse} used to. {@link #toRecord} and
- *       {@link #carriesRealResult} both now take that raw parsed map as an
- *       explicit parameter (named {@code rawStateBody}) instead of reading
- *       {@code body.data()}, which is confirmed to always be empty for this
- *       operation and kept only as the last-resort fallback it always
- *       was.</li>
- *   <li>Document classification has a genuine typed alternative
- *       ({@code context.subject.documents[0].classification}) with
- *       {@code category}/{@code type}/{@code subtype}/{@code countryName}/
- *       {@code year} fields — but no single {@code name} string matching the
- *       old raw JSON's {@code classification.name}. {@link #documentTypeLabel}
- *       tries composing a label from the typed fields first and falls back to
- *       walking {@code data} for a raw {@code classification.name}-shaped
- *       value, exactly per the task's "defensive, both paths" instruction.</li>
+ *   <li>{@code interactions().fetch()} returns {@code InteractionFetchResponse},
+ *       whose {@code interaction} is an untyped map — {@code collects} is
+ *       read from it the same way api-implementation's
+ *       {@code GoInteractionFetchResponse} reads it ({@code ref}/{@code spec}),
+ *       and {@code outstanding}/{@code instructions} arrive as untyped values
+ *       read as string lists.</li>
+ *   <li>{@code journeys().getState()} returns {@code StateFetchResponse}, whose
+ *       {@code context} and {@code result} are untyped maps. Go sends the
+ *       per-module steps under {@code context.process.steps} and the journey
+ *       summary under {@code context.process.journey}; {@link #toRecord} reads
+ *       both from there and the decision from {@code result}. In 0.1.0 the
+ *       typed {@code context} had no {@code process} and the body had no
+ *       {@code result}, so all of this was dropped and had to be recovered
+ *       from the raw response bytes — no longer necessary.</li>
+ *   <li>Document classification has no typed field in 0.2.0, so
+ *       {@link #documentTypeLabel} reads {@code classification.name} from the
+ *       same untyped map.</li>
  * </ul>
  */
 @Component
@@ -169,29 +134,38 @@ public class SdkInteractionMapper {
     // ------------------------------------------------------------------
 
     /**
-     * Builds the SDK's {@code StartJourneyRequest}.
+     * Builds the SDK's {@code StartJourneyRequest} with {@code config.delivery=api}
+     * and the prefill as {@code context.subject} — the same place the raw-HTTP
+     * client puts it.
      *
-     * <b>Judgment call, unverified</b>: the raw-HTTP client nested the
-     * prefill map at {@code context.subject} — an untyped location in the old
-     * wire shape. The SDK's {@code StartJourneyContext.subject} is now fully
-     * typed ({@code StartJourneyIdentity}/{@code StartJourneyDocument}/...),
-     * so an arbitrary caller-supplied {@code Map<String,Object>} can no longer
-     * be dropped there generically. {@code StartJourneyRequest} does carry a
-     * separate untyped {@code data} field alongside {@code context} — spike
-     * FINDINGS.md (Q2) reads that as "the subject-prefill map, untyped", so
-     * that is where {@code prefill} is sent here, with an empty typed
-     * {@code subject} and {@code config.delivery=API} (confirmed to exist and
-     * match the raw request's {@code delivery: "api"} exactly — see
-     * {@code Config}/{@code Delivery} in the SDK source). This has not been
-     * exercised against a live journey; if prefill silently has no effect,
-     * this is the mapping to revisit first.
+     * The prefill is subject-shaped ({@code identity}, {@code documents}, ...),
+     * so it is converted into the SDK's typed {@code StartJourneyContextSubject}.
+     * That type has no catch-all for extra properties and the SDK's mapper
+     * ignores unknown ones, so any key it has no field for is logged rather
+     * than dropped silently; a prefill that does not fit the type at all is
+     * logged and the journey starts without it.
      */
     public StartJourneyRequest toStartRequest(String resourceId, Map<String, Object> prefill) {
-        StartJourneyContext context = new StartJourneyContext(
-                new Config(Delivery.API),
-                new StartJourneySubject());
-        return new StartJourneyRequest(resourceId, context,
-                prefill == null || prefill.isEmpty() ? null : prefill);
+        return new StartJourneyRequest(resourceId, new StartJourneyContext(toSubject(prefill), new Config("api")));
+    }
+
+    private static StartJourneyContextSubject toSubject(Map<String, Object> prefill) {
+        if (prefill == null || prefill.isEmpty()) return null;
+        StartJourneyContextSubject subject;
+        try {
+            subject = JSON.getMapper().convertValue(prefill, StartJourneyContextSubject.class);
+        } catch (IllegalArgumentException e) {
+            log.warn("Journey prefill does not fit the SDK's StartJourneyContextSubject; starting without it (keys {})",
+                    prefill.keySet(), e);
+            return null;
+        }
+        Map<?, ?> sent = JSON.getMapper().convertValue(subject, Map.class);
+        Set<String> dropped = new java.util.LinkedHashSet<>(prefill.keySet());
+        dropped.removeIf(key -> sent.get(key) != null);
+        if (!dropped.isEmpty()) {
+            log.warn("StartJourneyContextSubject has no field for prefill keys {}; they are not sent", dropped);
+        }
+        return subject;
     }
 
     // ------------------------------------------------------------------
@@ -203,51 +177,49 @@ public class SdkInteractionMapper {
      * to {@code toInteraction(body, Set.of())} — see the two-argument form's
      * javadoc for why a journey in flight must use it instead.
      */
-    public Interaction toInteraction(ResponseBody1 body) {
+    public Interaction toInteraction(InteractionFetchResponse body) {
         return toInteraction(body, Set.of());
     }
 
     /**
-     * The next screen, given a full interaction body ({@code ResponseBody1} —
-     * present whenever Go has something to show, as opposed to
-     * {@code ResponseBody2}'s "still working, nothing to render yet" stub,
-     * handled separately by {@link #processingInteraction(String)}).
+     * The next screen for an interaction fetch.
+     *
+     * A response with no {@code interaction} is Go still working with nothing
+     * to show yet (0.1.0 modelled that as a separate {@code ResponseBody2}
+     * shape): it gets the processing screen, whatever the status says, and
+     * the front end's {@code /state} poll surfaces the decision.
      *
      * @param completed stage names already submitted on this journey; never null.
      */
-    public Interaction toInteraction(ResponseBody1 body, Set<String> completed) {
-        String goStatus = body.journey().status().value();
-        String interactionId = body.interactionId() != null ? body.interactionId() : body.instanceId();
+    public Interaction toInteraction(InteractionFetchResponse body, Set<String> completed) {
+        String goStatus = body.journey().status();
+        String interactionId = body.interactionId().orElse(body.instanceId());
 
-        if (isFailed(goStatus)) {
+        // Checked before anything else, as in DefaultInteractionMapper: a
+        // failed journey, or a failed result.status whatever the journey
+        // status says, will never move again. Left until after the interaction
+        // body, an abandoned journey still showed its last screen, and the
+        // customer kept submitting into it.
+        if (isFailed(goStatus) || resultFailed(body.result().orElse(null))) {
             return failedInteraction(interactionId);
         }
+        if (body.interaction().isEmpty()) {
+            return processingInteraction(interactionId);
+        }
 
-        List<String> outstandingRaw = body.outstanding().orElse(List.of());
+        List<String> outstandingRaw = stringList(body.outstanding().orElse(null));
         if (awaitingManualReview(outstandingRaw)) {
             return manualReviewInteraction(interactionId);
         }
 
-        // No `processing` flag on ResponseBody1 (only ResponseBody2 carries
-        // one) — a real interaction body means there is something to collect
-        // or the journey is otherwise pending customer input, so `false` here
-        // reproduces the raw mapper's behaviour exactly (mapStatus falls
-        // through "InProgress" + processing=false to PENDING_INPUT, which is
-        // what lets the code below pick a screen from `outstanding`/`collects`).
-        JourneyStatus status = mapStatus(goStatus, false);
+        // Go still working on this interaction (processing: true) gets the
+        // processing screen, the same rule as DefaultInteractionMapper;
+        // otherwise "InProgress" falls through to PENDING_INPUT and the code
+        // below picks a screen from `outstanding`/`collects`.
+        JourneyStatus status = mapStatus(goStatus, body.processing().orElse(false));
         if (status == JourneyStatus.COMPLETED) {
-            // ResponseBody1 carries no decision (`result`) at all — that only
-            // ever arrives via journeys().getState(). Rather than guess at a
-            // decision here (or fabricate a RESULT screen with a null
-            // decision, which GoSdkClient.statusFrom would read back as
-            // PENDING_INPUT anyway — see GoApiClient's original comment on
-            // that same fallback), defer to a processing screen and let the
-            // front end's normal `/state` poll (GoSdkClient.fetchState ->
-            // journeys().getState()) surface the real decision. This is a
-            // real, deliberate behaviour difference from api-implementation,
-            // which could sometimes short-circuit straight to a RESULT screen
-            // from the interaction fetch itself — see this module's README,
-            // "Known gaps".
+            // Defer to a processing screen and let the front end's /state poll
+            // surface the real decision (journeys().getState()), as before.
             return processingInteraction(interactionId);
         }
         // Paused (e.g. awaiting a manual review): Go won't accept input, so
@@ -260,7 +232,7 @@ public class SdkInteractionMapper {
         List<String> collectable = collectableRefs(body);
         List<String> outstanding = collectable.isEmpty() ? outstandingRaw : collectable;
         Set<String> requiredRefs = requiredRefs(body);
-        List<String> instructions = body.instructions().orElse(List.of());
+        List<String> instructions = stringList(body.instructions().orElse(null));
 
         if (outstanding.isEmpty()) {
             return processingInteraction(interactionId);
@@ -272,7 +244,7 @@ public class SdkInteractionMapper {
         boolean side1Submitted = documentStage.isPresent() && completed.contains(documentStage.get().name());
 
         if (documentStage.isPresent() && side1Submitted) {
-            if (side2Required(outstandingRaw, instructions)) {
+            if (awaitingSecondSide(outstandingRaw, instructions, completed)) {
                 return toStagedInteraction(interactionId, documentStage.get().asSecondSide(),
                         outstanding, completed, requiredRefs);
             }
@@ -298,7 +270,6 @@ public class SdkInteractionMapper {
                 .orElseGet(() -> unmappedElementsInteraction(interactionId, finalOutstanding));
     }
 
-    /** The processing screen for a {@code ResponseBody2} ("still working, no interaction yet") fetch result. */
     public Interaction processingInteraction(String interactionId) {
         return processingInteraction(interactionId, "Running Identity Verification", "This usually takes a few seconds.");
     }
@@ -460,11 +431,71 @@ public class SdkInteractionMapper {
                 && outstanding.stream().anyMatch("ManualReviewDecision"::equalsIgnoreCase);
     }
 
-    private static boolean side2Required(List<String> outstanding, List<String> instructions) {
+    /**
+     * Whether Go is waiting for the back of the document: it names
+     * {@code PrimaryDocument/side2Image} in {@code outstanding}, or instructs
+     * {@code Side2Required}.
+     *
+     * Once the back has been submitted the instruction alone no longer counts.
+     * The first fetch after that submit still says {@code Side2Required} while
+     * {@code outstanding} has already dropped {@code side2Image}; the next says
+     * {@code Side2Done} (live tenant, 2026-11-02, Meridian). Counting that stale
+     * instruction showed the back-of-document screen a second time, and the
+     * capture taken on it was then routed as the selfie, because by the submit
+     * Go said Side2Done. If Go wants the back again it names
+     * {@code side2Image} in {@code outstanding}, which still counts.
+     */
+    static boolean side2Required(List<String> outstanding, List<String> instructions, boolean backSubmitted) {
         if (outstanding != null && outstanding.contains("PrimaryDocument/side2Image")) {
             return true;
         }
-        return instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+        return !backSubmitted
+                && instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+    }
+
+    /**
+     * Whether the screen now showing is the back of the document: the front
+     * has been submitted and Go wants the back ({@link #side2Required}).
+     * {@code toInteraction} picks the screen with this and
+     * {@code GoSdkClient.resolveAttachment} routes the capture with it, so
+     * the two cannot disagree. Before the front is in, a {@code side2Image}
+     * that some journeys list from the first fetch does not count: the screen
+     * is the front, and its capture must go to Go as the front.
+     */
+    public boolean awaitingSecondSide(List<String> outstanding, List<String> instructions, Set<String> completed) {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .filter(stage -> completed.contains(stage.name()))
+                .map(stage -> side2Required(outstanding, instructions, completed.contains(secondSideMarker(stage))))
+                .orElse(false);
+    }
+
+    /**
+     * Whether Go has finished with the back: {@code Side2Done}. The caller
+     * then forgets that the back was submitted, so a later request for it
+     * that arrives as the instruction alone reopens the back screen.
+     */
+    static boolean side2Done(List<String> instructions) {
+        return instructions != null && instructions.stream().anyMatch("Side2Done"::equalsIgnoreCase);
+    }
+
+    /**
+     * The entry {@code GoSdkClient} adds to an instance's completed stages once
+     * the back of the document is submitted. The back shares the document
+     * stage, so it has no stage name of its own; no screen-plan stage can
+     * have this name, so the stage logic ignores it.
+     */
+    static String secondSideMarker(ScreenPlanProperties.Stage documentStage) {
+        return documentStage.name() + "#back-submitted";
+    }
+
+    /** {@link #secondSideMarker} for this market's document stage; empty if it has none. */
+    public Optional<String> secondSideMarker() {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .map(SdkInteractionMapper::secondSideMarker);
     }
 
     private static boolean side2Undecided(List<String> instructions) {
@@ -490,56 +521,44 @@ public class SdkInteractionMapper {
         return JourneyStatus.PENDING_INPUT;
     }
 
-    /**
-     * {@code journeys().getState()}'s {@code ResponseBody2}-equivalent path:
-     * a fetch that returned no interaction body at all, just a status and
-     * (maybe) a processing flag. Public so {@link GoSdkClient} can call it
-     * directly for that union branch without duplicating the mapStatus logic.
-     */
-    public Interaction processingOrTerminalWithoutInteraction(String interactionId, String goStatus, boolean processing) {
-        // Whatever mapStatus(goStatus, processing) would say — Completed,
-        // Failed, or genuinely still running — this response shape carries no
-        // decision payload at all (no `result`, unlike the raw HTTP client's
-        // GoInteractionFetchResponse). Every branch defers to a processing
-        // screen and lets the front end's /state poll (GoSdkClient.fetchState
-        // -> journeys().getState(), which does carry a decision) surface the
-        // actual terminal outcome. See this class's javadoc and this module's
-        // README "Known gaps" for why this is a deliberate behaviour
-        // difference from api-implementation.
-        return processingInteraction(interactionId);
-    }
-
     // ------------------------------------------------------------------
-    // collects() helpers
+    // Untyped interaction-fetch helpers. 0.2.0 types `interaction` as a Map
+    // and `instructions`/`outstanding` as Object, so these read them the same
+    // way api-implementation's GoInteractionFetchResponse reads raw JSON.
     // ------------------------------------------------------------------
 
-    private static String refOf(CollectUnion union) {
-        Optional<Collect1> c1 = union.collect1();
-        if (c1.isPresent()) return c1.get().ref();
-        Optional<Collect2> c2 = union.collect2();
-        return c2.map(Collect2::ref).orElse(null);
-    }
-
-    private static boolean requiredOf(CollectUnion union) {
-        Optional<Collect1> c1 = union.collect1();
-        if (c1.isPresent()) return "required".equalsIgnoreCase(c1.get().spec().value());
-        Optional<Collect2> c2 = union.collect2();
-        return c2.map(c -> "required".equalsIgnoreCase(c.spec().value())).orElse(false);
-    }
-
-    /** Public so {@link GoSdkClient} can populate its collects-preferred cache from the same source. */
-    public static List<String> collectableRefs(ResponseBody1 body) {
-        return body.interaction().collects().stream()
-                .map(SdkInteractionMapper::refOf)
-                .filter(java.util.Objects::nonNull)
+    /** The string entries of a JSON array; empty for null or any other shape. Non-string entries are skipped. */
+    public static List<String> stringList(Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        return list.stream()
+                .filter(String.class::isInstance)
+                .map(String.class::cast)
                 .toList();
     }
 
-    private static Set<String> requiredRefs(ResponseBody1 body) {
-        return body.interaction().collects().stream()
-                .filter(SdkInteractionMapper::requiredOf)
-                .map(SdkInteractionMapper::refOf)
-                .filter(java.util.Objects::nonNull)
+    /** {@code interaction.collects[]} entries whose {@code ref} is a string. */
+    private static List<Map<String, Object>> collects(InteractionFetchResponse body) {
+        Map<String, Object> interaction = body.interaction().orElse(null);
+        if (interaction == null || !(interaction.get("collects") instanceof List<?> entries)) return List.of();
+        List<Map<String, Object>> collects = new ArrayList<>(entries.size());
+        for (Object entry : entries) {
+            Map<String, Object> map = asMap(entry);
+            if (map != null && map.get("ref") instanceof String) collects.add(map);
+        }
+        return collects;
+    }
+
+    /** Public so {@link GoSdkClient} can populate its collects-preferred cache from the same source. */
+    public static List<String> collectableRefs(InteractionFetchResponse body) {
+        return collects(body).stream()
+                .map(collect -> (String) collect.get("ref"))
+                .toList();
+    }
+
+    private static Set<String> requiredRefs(InteractionFetchResponse body) {
+        return collects(body).stream()
+                .filter(collect -> "required".equalsIgnoreCase(asString(collect.get("spec"))))
+                .map(collect -> (String) collect.get("ref"))
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
@@ -548,21 +567,18 @@ public class SdkInteractionMapper {
     // ------------------------------------------------------------------
 
     /**
-     * @param rawStateBody the same {@code journey/state/fetch} response,
-     *                      parsed independently from the raw wire bytes
-     *                      ({@link RawStateBodyCapturingHttpClient}) — see
-     *                      this class's javadoc for why {@code body.data()}
-     *                      alone is not enough. Never null; pass {@code Map.of()}
-     *                      if the raw bytes genuinely could not be captured.
+     * @param state the full-view {@code journey/state/fetch} response; its
+     *              {@code context} and {@code result} are untyped maps, read
+     *              defensively below.
      */
-    public RecordResponse toRecord(GetJourneyStateResponseBody body, Map<String, Object> rawStateBody) {
-        String goStatus = body.status().value();
-        // body.data() is confirmed always empty for this operation (see class
-        // javadoc) but costs nothing to prefer if the SDK ever starts
-        // populating it — rawStateBody is the confirmed-working source.
-        Map<String, Object> data = !rawStateBody.isEmpty() ? rawStateBody : body.data().orElse(Map.of());
+    public RecordResponse toRecord(StateFetchResponse state) {
+        String goStatus = state.status();
+        Map<String, Object> data = stateData(state);
 
-        Decision decision = isFailed(goStatus) ? Decision.FAIL : mapDecision(rawResult(data));
+        // A failed result.status overrides any classification beside it — see
+        // resultFailed.
+        boolean resultFailed = resultFailed(state);
+        Decision decision = isFailed(goStatus) || resultFailed ? Decision.FAIL : mapDecision(rawResult(data));
         List<RawStep> steps = rawSteps(data);
 
         List<ModuleRun> moduleRuns = steps.stream()
@@ -574,8 +590,11 @@ public class SdkInteractionMapper {
                         step.resultOutcome()))
                 .toList();
 
+        // A failed result.status is a platform outcome — a module's terminal
+        // error or the journey being abandoned — never a verdict on the
+        // customer, so it reads as one even without module advice.
         String moduleAdvice = firstModuleErrorAction(steps);
-        boolean systemError = decision == Decision.FAIL && moduleAdvice != null;
+        boolean systemError = (decision == Decision.FAIL && moduleAdvice != null) || resultFailed;
 
         String title = systemError
                 ? "We could not run your checks"
@@ -586,7 +605,9 @@ public class SdkInteractionMapper {
                 };
 
         String body_ = systemError
-                ? moduleAdvice
+                ? (moduleAdvice != null
+                        ? moduleAdvice
+                        : "We could not run your checks. Nothing has been decided about you — please try again.")
                 : switch (decision) {
                     case PASS -> "Your identity has been verified.";
                     case FAIL -> "We were not able to verify your identity from what you provided.";
@@ -607,8 +628,8 @@ public class SdkInteractionMapper {
                     : journeyInfo.name() + " · v" + journeyInfo.version();
             summary.add(new SummaryRow("Journey", journeyLabel));
         }
-        if (body.instanceId() != null && !body.instanceId().isBlank()) {
-            summary.add(new SummaryRow("Reference", body.instanceId()));
+        if (state.instanceId() != null && !state.instanceId().isBlank()) {
+            summary.add(new SummaryRow("Reference", state.instanceId()));
         }
         String startedLabel = formatTimestamp(startedAt);
         if (startedLabel != null) {
@@ -621,7 +642,7 @@ public class SdkInteractionMapper {
         if (totalTime != null) {
             summary.add(new SummaryRow("Total time", totalTime));
         }
-        String documentLabel = documentTypeLabel(body, data);
+        String documentLabel = documentTypeLabel(data);
         if (documentLabel != null) {
             summary.add(new SummaryRow("Document", documentLabel));
         }
@@ -640,24 +661,46 @@ public class SdkInteractionMapper {
     }
 
     /**
-     * Terminal check for {@code GoSdkClient.fetchState} — needs both the
-     * typed {@code status} and the module-run list {@link #toRecord} already
-     * derives from {@code data}, so it takes the same body plus the already-
-     * computed {@code RecordResponse} rather than re-deriving moduleRuns
-     * itself.
+     * Whether the journey's own {@code result.status} says it ended in
+     * failure. Go documents this as the authoritative success signal: a
+     * journey can pass an evaluation and then fail before finishing (a
+     * module's terminal error, or the platform abandoning it on a deadlock or
+     * timeout), leaving a positive classification beside {@code status:
+     * "error"} — and that is not a pass. Go reports an elapsed deadline as
+     * {@code error} today; {@code timeout} is accepted too. A deadlocked
+     * journey reports {@code abandoned} (gbggo4-demo, 2026-10-29).
      */
-    public boolean carriesRealResult(GetJourneyStateResponseBody body, Map<String, Object> rawStateBody) {
-        Map<String, Object> data = !rawStateBody.isEmpty() ? rawStateBody : body.data().orElse(Map.of());
-        RawResult result = rawResult(data);
+    public boolean resultFailed(StateFetchResponse state) {
+        return resultFailed(state.result().orElse(null));
+    }
+
+    /** {@link #resultFailed(StateFetchResponse)} for any response's untyped {@code result}, null included. */
+    static boolean resultFailed(Map<String, Object> result) {
+        Object status = result == null ? null : result.get("status");
+        return status != null
+                && ("error".equalsIgnoreCase(status.toString()) || "timeout".equalsIgnoreCase(status.toString())
+                        || "abandoned".equalsIgnoreCase(status.toString()));
+    }
+
+    /** Terminal check for {@code GoSdkClient.fetchState}: has Go reached a decision yet? */
+    public boolean carriesRealResult(StateFetchResponse state) {
+        RawResult result = rawResult(stateData(state));
         return result != null && result.outcomeClassification() != null;
     }
 
     // ------------------------------------------------------------------
-    // Defensive `data`-map walking. See the class javadoc: GetJourneyState's
-    // typed `context` has no field for any of this — it is read from the
-    // untyped catch-all the same way the raw-HTTP client used to deserialize
-    // its own JSON, because that is the only place left it can be.
+    // Defensive map walking. 0.2.0 types the full state view's `context`
+    // and `result` as untyped maps, so they are read the same way the
+    // raw-HTTP client deserializes its own JSON.
     // ------------------------------------------------------------------
+
+    /** The state response's untyped {@code context} and {@code result}, keyed as on the wire. */
+    private static Map<String, Object> stateData(StateFetchResponse state) {
+        Map<String, Object> data = new java.util.HashMap<>();
+        state.context().ifPresent(context -> data.put("context", context));
+        state.result().ifPresent(result -> data.put("result", result));
+        return data;
+    }
 
     private record RawStep(String name, String status, String outcome, String outcomeClassification,
                             Long durationMilliSec, String endedAt, String errorFirstAction) {
@@ -698,21 +741,23 @@ public class SdkInteractionMapper {
         return null;
     }
 
-    /** Root-level `result`, mirroring the raw GoStateResponse.result() field. Not fully confirmed live — see class javadoc. */
+    /** Root-level `result`, mirroring the raw GoStateResponse.result() field. */
     private static RawResult rawResult(Map<String, Object> data) {
         Map<String, Object> result = asMap(data.get("result"));
         if (result == null) return null;
         return new RawResult(asString(result.get("outcome")), asString(result.get("outcomeClassification")));
     }
 
-    /** `steps`, falling back to `context.process.steps` — same dual path as the old GoStateResponse.allSteps(). */
+    /** {@code context.process}, where Go sends the per-module steps and journey summary. */
+    private static Map<String, Object> process(Map<String, Object> data) {
+        Map<String, Object> context = asMap(data.get("context"));
+        return context == null ? null : asMap(context.get("process"));
+    }
+
+    /** {@code context.process.steps}. */
     private static List<RawStep> rawSteps(Map<String, Object> data) {
-        List<Object> raw = asList(data.get("steps"));
-        if (raw == null || raw.isEmpty()) {
-            Map<String, Object> context = asMap(data.get("context"));
-            Map<String, Object> process = context == null ? null : asMap(context.get("process"));
-            raw = process == null ? null : asList(process.get("steps"));
-        }
+        Map<String, Object> process = process(data);
+        List<Object> raw = process == null ? null : asList(process.get("steps"));
         if (raw == null) return List.of();
         List<RawStep> steps = new ArrayList<>(raw.size());
         for (Object entry : raw) {
@@ -723,8 +768,8 @@ public class SdkInteractionMapper {
             String status = result == null ? null : asString(result.get("status"));
             String outcome = result == null ? null : asString(result.get("outcome"));
             String outcomeClassification = asString(step.get("outcomeClassification"));
-            Map<String, Object> process = asMap(step.get("process"));
-            Map<String, Object> detail = process == null ? null : asMap(process.get("step"));
+            Map<String, Object> stepProcess = asMap(step.get("process"));
+            Map<String, Object> detail = stepProcess == null ? null : asMap(stepProcess.get("step"));
             Long durationMilliSec = detail == null ? null : asLong(detail.get("durationMilliSec"));
             String endedAt = detail == null ? null : asString(detail.get("endedAt"));
             String errorFirstAction = null;
@@ -741,77 +786,23 @@ public class SdkInteractionMapper {
         return steps;
     }
 
-    /** `journey`, falling back to `context.process.journey` — same dual path as the old GoStateResponse.journeyInfo(). */
+    /** {@code context.process.journey}. */
     private static RawJourney rawJourneyInfo(Map<String, Object> data) {
-        Map<String, Object> journey = asMap(data.get("journey"));
-        if (journey == null) {
-            Map<String, Object> context = asMap(data.get("context"));
-            Map<String, Object> process = context == null ? null : asMap(context.get("process"));
-            journey = process == null ? null : asMap(process.get("journey"));
-        }
+        Map<String, Object> process = process(data);
+        Map<String, Object> journey = process == null ? null : asMap(process.get("journey"));
         if (journey == null) return null;
         return new RawJourney(asString(journey.get("name")), asString(journey.get("version")),
                 asString(journey.get("startedAt")), asString(journey.get("endedAt")));
     }
 
     /**
-     * The document type Document Classification reported. Tries the typed
-     * {@code context.subject.documents[0].classification} first — composing a
-     * label from its {@code countryName}/{@code type}/{@code subtype}/
-     * {@code year} fields, the closest reconstruction of the raw single
-     * {@code classification.name} string available from that shape — then
-     * falls back to walking {@code data} for a raw {@code documents[0].
-     * classification.name} value the way the original mapper read it.
-     * Neither path is confirmed against a live populated response.
+     * The document type Document Classification reported: the first step
+     * whose {@code result.subject.documents[0].classification.name} is set,
+     * read the way api-implementation's mapper reads it.
      */
-    private String documentTypeLabel(GetJourneyStateResponseBody body, Map<String, Object> data) {
-        String typed = typedDocumentTypeLabel(body);
-        if (typed != null) return typed;
-        return rawDocumentTypeLabel(data);
-    }
-
-    private String typedDocumentTypeLabel(GetJourneyStateResponseBody body) {
-        try {
-            var subjectOpt = body.context();
-            if (subjectOpt.isEmpty()) return null;
-            var documents = subjectOpt.get().subject().documents();
-            if (documents.isEmpty() || documents.get().isEmpty()) return null;
-            GetJourneyStateDocument document = documents.get().get(0);
-            GetJourneyStateClassification classification = document.classification().orElse(null);
-            if (classification == null) return null;
-            String country = classification.countryName().orElse(null);
-            String code = classification.countryCode().orElse(null);
-            String type = classification.type().orElse(null);
-            String year = classification.year().orElse(null);
-            StringBuilder label = new StringBuilder();
-            if (country != null) {
-                label.append(country);
-                if (code != null) label.append(" (").append(code).append(")");
-            }
-            if (type != null) {
-                if (!label.isEmpty()) label.append(" ");
-                label.append(type);
-            }
-            if (year != null) {
-                label.append(" (").append(year).append(")");
-            }
-            return label.isEmpty() ? null : label.toString();
-        } catch (RuntimeException e) {
-            // Defensive: this path is unverified against a live response, so
-            // any unexpected shape falls back to the raw `data` walk instead
-            // of breaking the whole record screen.
-            log.debug("Typed document classification read failed, falling back to raw data map", e);
-            return null;
-        }
-    }
-
-    private static String rawDocumentTypeLabel(Map<String, Object> data) {
-        List<Object> steps = asList(data.get("steps"));
-        if (steps == null) {
-            Map<String, Object> context = asMap(data.get("context"));
-            Map<String, Object> process = context == null ? null : asMap(context.get("process"));
-            steps = process == null ? null : asList(process.get("steps"));
-        }
+    private static String documentTypeLabel(Map<String, Object> data) {
+        Map<String, Object> process = process(data);
+        List<Object> steps = process == null ? null : asList(process.get("steps"));
         if (steps == null) return null;
         for (Object entry : steps) {
             Map<String, Object> step = asMap(entry);
@@ -1042,15 +1033,39 @@ public class SdkInteractionMapper {
         String gender;
         String mothersMaidenName;
         final Map<String, String> addressComponents = new LinkedHashMap<>();
+        /**
+         * One previous address, free text ({@code addressString}) and
+         * components together, built into the only previousAddresses[] entry.
+         */
+        final Map<String, String> previousAddressComponents = new LinkedHashMap<>();
         final List<SubmitInteractionIdentityPhone> phones = new ArrayList<>();
         final List<SubmitInteractionIdentityEmail> emails = new ArrayList<>();
         final List<SubmitInteractionIdentityIdNumber> idNumbers = new ArrayList<>();
-        final List<SubmitInteractionIdentityPreviousAddress> previousAddresses = new ArrayList<>();
 
         boolean hasAnyValue() {
             return firstName != null || lastNames != null || dateOfBirth != null || gender != null
                     || mothersMaidenName != null || !addressComponents.isEmpty() || !phones.isEmpty()
-                    || !emails.isEmpty() || !idNumbers.isEmpty() || !previousAddresses.isEmpty();
+                    || !emails.isEmpty() || !idNumbers.isEmpty() || !previousAddressComponents.isEmpty();
+        }
+
+        private static SubmitInteractionIdentityPreviousAddress previousAddress(Map<String, String> components) {
+            SubmitInteractionIdentityPreviousAddress.Builder addr = SubmitInteractionIdentityPreviousAddress.builder();
+            components.forEach((component, val) -> {
+                switch (component) {
+                    case "premise" -> addr.premise(val);
+                    case "subBuilding" -> addr.subBuilding(val);
+                    case "building" -> addr.building(val);
+                    case "thoroughfare" -> addr.thoroughfare(val);
+                    case "dependentThoroughfare" -> addr.dependentThoroughfare(val);
+                    case "locality" -> addr.locality(val);
+                    case "dependentLocality" -> addr.dependentLocality(val);
+                    case "postalCode" -> addr.postalCode(val);
+                    case "country" -> addr.country(countryCode(val));
+                    case "addressString" -> addr.addressString(val);
+                    default -> log.debug("Unmapped previous-address component {} — dropped", component);
+                }
+            });
+            return addr.build();
         }
 
         SubmitInteractionIdentity build() {
@@ -1082,7 +1097,10 @@ public class SdkInteractionMapper {
             if (!phones.isEmpty()) b.phones(phones);
             if (!emails.isEmpty()) b.emails(emails);
             if (!idNumbers.isEmpty()) b.idNumbers(idNumbers);
-            if (!previousAddresses.isEmpty()) b.previousAddresses(previousAddresses);
+            if (!previousAddressComponents.isEmpty()) {
+                // One entry, at the index apply() reported for every part of it.
+                b.previousAddresses(List.of(previousAddress(previousAddressComponents)));
+            }
             return b.build();
         }
     }
@@ -1117,7 +1135,7 @@ public class SdkInteractionMapper {
         private enum Target {
             FIRST_NAME, LAST_NAMES, DATE_OF_BIRTH, GENDER, MOTHERS_MAIDEN_NAME,
             ADDRESS_COMPONENT, PHONE_MOBILE, PHONE_LANDLINE, EMAIL_PERSONAL, EMAIL_WORK,
-            ID_NUMBER_NI, ID_NUMBER_SSN, PREVIOUS_ADDRESS,
+            ID_NUMBER_NI, ID_NUMBER_SSN, PREVIOUS_ADDRESS, PREVIOUS_ADDRESS_COMPONENT,
             DOCUMENT_SIDE1, DOCUMENT_SIDE2, SELFIE, DROPPED
         }
 
@@ -1167,10 +1185,28 @@ public class SdkInteractionMapper {
             return m;
         }
 
+        /**
+         * The key as sent, then its leaf after the last {@code /} — but only
+         * when the leaf's entry belongs to the same domain element as the ref.
+         * Leaf names repeat across elements ({@code PreviousAddresses/postalCode}
+         * and {@code CurrentAddress/postalCode}), and matching on the leaf alone
+         * would write a previous address's postcode over the current one.
+         *
+         * A previous-address component goes into the first
+         * {@code previousAddresses[]} entry instead, with every other component
+         * of the same address. Without this it matched nothing and was dropped.
+         */
         static FieldMapping forKey(String key) {
             FieldMapping known = KNOWN.get(key);
             if (known == null && key.contains("/")) {
-                known = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+                String element = key.substring(0, key.indexOf('/'));
+                FieldMapping byLeaf = KNOWN.get(key.substring(key.lastIndexOf('/') + 1));
+                if ("PreviousAddresses".equals(element) && byLeaf != null && byLeaf.target() == Target.ADDRESS_COMPONENT) {
+                    return new FieldMapping(element, Target.PREVIOUS_ADDRESS_COMPONENT, byLeaf.addressComponent());
+                }
+                if (byLeaf != null && byLeaf.domainElementId().equals(element)) {
+                    known = byLeaf;
+                }
             }
             if (known != null) return known;
             log.warn("No SDK submit mapping for field '{}' — dropped (SubmitInteractionRequest has no untyped "
@@ -1221,10 +1257,16 @@ public class SdkInteractionMapper {
                     identity.idNumbers.add(new SubmitInteractionIdentityIdNumber("SSN", text, null));
                     return id + "idNumbers." + (identity.idNumbers.size() - 1) + ".idNumber";
                 }
+                // The free-text form joins the components of the same address
+                // in one entry, whichever key arrives first, so a Go error on
+                // either names the field that was sent.
                 case PREVIOUS_ADDRESS -> {
-                    identity.previousAddresses.add(
-                            SubmitInteractionIdentityPreviousAddress.builder().addressString(text).build());
-                    return id + "previousAddresses." + (identity.previousAddresses.size() - 1) + ".addressString";
+                    identity.previousAddressComponents.put("addressString", text);
+                    return id + "previousAddresses.0.addressString";
+                }
+                case PREVIOUS_ADDRESS_COMPONENT -> {
+                    identity.previousAddressComponents.put(addressComponent, text);
+                    return id + "previousAddresses.0." + addressComponent;
                 }
                 case DOCUMENT_SIDE1 -> { mergeDocument(documents, true, text); return "context.subject.documents.0.side1Image"; }
                 case DOCUMENT_SIDE2 -> { mergeDocument(documents, false, text); return "context.subject.documents.0.side2Image"; }

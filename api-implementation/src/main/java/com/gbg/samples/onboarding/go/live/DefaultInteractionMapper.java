@@ -234,7 +234,7 @@ public class DefaultInteractionMapper {
         boolean side1Submitted = documentStage.isPresent() && completed.contains(documentStage.get().name());
 
         if (documentStage.isPresent() && side1Submitted) {
-            if (side2Required(response.outstanding(), response.instructions())) {
+            if (awaitingSecondSide(response.outstanding(), response.instructions(), completed)) {
                 return toStagedInteraction(interactionId, documentStage.get().asSecondSide(),
                         outstanding, completed, requiredRefs);
             }
@@ -529,22 +529,6 @@ public class DefaultInteractionMapper {
     }
 
     /**
-     * Whether Go is waiting for the back of the document.
-     *
-     * Two signals, either of which is enough. Go names
-     * {@code PrimaryDocument/side2Image} in {@code outstanding} once
-     * Classification has read side 1 and found a two-sided document type, and
-     * separately instructs {@code Side2Required}. The instruction is the
-     * clearer of the two, but it travels alongside {@code Side2Done} and
-     * {@code LazySide2CollectionRequired} on the same journey at different
-     * points, so both are read rather than relying on either alone.
-     *
-     * {@code LazySide2CollectionRequired} deliberately does not count: it is
-     * the pre-capture state, present from the very first fetch, and treating
-     * it as a request for side 2 would show the back-of-document screen before
-     * the front had been taken.
-     */
-    /**
      * Whether the journey is parked awaiting a human reviewer.
      *
      * Go signals this by naming {@code ManualReviewDecision} in
@@ -557,11 +541,79 @@ public class DefaultInteractionMapper {
                 && outstanding.stream().anyMatch("ManualReviewDecision"::equalsIgnoreCase);
     }
 
-    private static boolean side2Required(List<String> outstanding, List<String> instructions) {
+    /**
+     * Whether Go is waiting for the back of the document: it names
+     * {@code PrimaryDocument/side2Image} in {@code outstanding} once
+     * Classification has read side 1 and found a two-sided document type, or
+     * instructs {@code Side2Required}. Either is enough before the back is
+     * submitted: Go doesn't always list {@code side2Image}.
+     *
+     * {@code LazySide2CollectionRequired} deliberately does not count: it is
+     * the pre-capture state, present from the very first fetch, and treating
+     * it as a request for side 2 would show the back-of-document screen before
+     * the front had been taken.
+     *
+     * Once the back has been submitted the instruction alone no longer counts.
+     * The first fetch after that submit still says {@code Side2Required} while
+     * {@code outstanding} has already dropped {@code side2Image}; the next says
+     * {@code Side2Done} (live tenant, 2026-11-02, Meridian). Counting that stale
+     * instruction showed the back-of-document screen a second time, and the
+     * capture taken on it was then routed as the selfie, because by the submit
+     * Go said Side2Done. If Go wants the back again it names
+     * {@code side2Image} in {@code outstanding}, which still counts.
+     */
+    static boolean side2Required(List<String> outstanding, List<String> instructions, boolean backSubmitted) {
         if (outstanding != null && outstanding.contains("PrimaryDocument/side2Image")) {
             return true;
         }
-        return instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+        return !backSubmitted
+                && instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+    }
+
+    /**
+     * Whether the screen now showing is the back of the document: the front
+     * has been submitted and Go wants the back ({@link #side2Required}).
+     * {@code toInteraction} picks the screen with this and
+     * {@code GoApiClient.resolveAttachment} routes the capture with it, so
+     * the two cannot disagree. Before the front is in, a {@code side2Image}
+     * that some journeys list from the first fetch does not count: the screen
+     * is the front, and its capture must go to Go as the front.
+     */
+    public boolean awaitingSecondSide(List<String> outstanding, List<String> instructions,
+                                      java.util.Set<String> completed) {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .filter(stage -> completed.contains(stage.name()))
+                .map(stage -> side2Required(outstanding, instructions, completed.contains(secondSideMarker(stage))))
+                .orElse(false);
+    }
+
+    /**
+     * Whether Go has finished with the back: {@code Side2Done}. The caller
+     * then forgets that the back was submitted, so a later request for it
+     * that arrives as the instruction alone reopens the back screen.
+     */
+    static boolean side2Done(List<String> instructions) {
+        return instructions != null && instructions.stream().anyMatch("Side2Done"::equalsIgnoreCase);
+    }
+
+    /**
+     * The entry {@code GoApiClient} adds to an instance's completed stages once
+     * the back of the document is submitted. The back shares the document
+     * stage, so it has no stage name of its own; no screen-plan stage can
+     * have this name, so the stage logic ignores it.
+     */
+    static String secondSideMarker(ScreenPlanProperties.Stage documentStage) {
+        return documentStage.name() + "#back-submitted";
+    }
+
+    /** {@link #secondSideMarker} for this market's document stage; empty if it has none. */
+    public java.util.Optional<String> secondSideMarker() {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .map(DefaultInteractionMapper::secondSideMarker);
     }
 
     /**

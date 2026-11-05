@@ -1,24 +1,32 @@
 package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.Go;
-import com.gbg.gocore.models.errors.APIException;
+import com.gbg.gocore.models.InteractionFetchResponse;
+import com.gbg.gocore.models.InteractionFetchResponseJourney;
+import com.gbg.gocore.models.InteractionFetchResponseView;
+import com.gbg.gocore.models.SlimInteractionFetchResponse;
+import com.gbg.gocore.models.SlimStateFetchResponse;
+import com.gbg.gocore.models.InteractionSubmitResponse;
+import com.gbg.gocore.models.InteractionSubmitResponseStatus;
+import com.gbg.gocore.models.JourneyStartResponse;
+import com.gbg.gocore.models.StateFetchResponse;
+import com.gbg.gocore.models.errors.GoException;
 import com.gbg.gocore.utils.JSON;
-import com.gbg.gocore.models.operations.FetchInteractionError;
-import com.gbg.gocore.models.operations.FetchInteractionRequest;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.gbg.gocore.models.operations.FetchInteractionRequestBody;
 import com.gbg.gocore.models.operations.FetchInteractionResponse;
 import com.gbg.gocore.models.operations.FetchInteractionResponseBody;
 import com.gbg.gocore.models.operations.FetchInteractionSecurity;
-import com.gbg.gocore.models.operations.GetJourneyStateRequest;
+import com.gbg.gocore.models.operations.GetJourneyStateRequestBody;
 import com.gbg.gocore.models.operations.GetJourneyStateResponse;
 import com.gbg.gocore.models.operations.GetJourneyStateResponseBody;
-import com.gbg.gocore.models.operations.ResponseBody1;
-import com.gbg.gocore.models.operations.ResponseBody2;
 import com.gbg.gocore.models.operations.StartJourneyRequest;
 import com.gbg.gocore.models.operations.StartJourneyResponse;
-import com.gbg.gocore.models.operations.SubmitInteractionError;
 import com.gbg.gocore.models.operations.SubmitInteractionRequest;
 import com.gbg.gocore.models.operations.SubmitInteractionResponse;
 import com.gbg.gocore.models.operations.SubmitInteractionSecurity;
+import com.gbg.gocore.models.operations.UnknownFetchInteractionResponseBody;
+import com.gbg.gocore.models.operations.UnknownGetJourneyStateResponseBody;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.Interaction;
 import com.gbg.samples.onboarding.api.dto.JourneyStatus;
@@ -53,14 +61,9 @@ import java.util.function.Supplier;
  * SDK's operations instead of raw HTTP calls (see method-by-method javadoc
  * below for what changed and why).
  *
- * Structurally complete and exercised against the shapes confirmed by
- * reading the SDK's real generated source (see
- * {@code docs/sdk-jar-inspection/FINDINGS.md}), but — like
- * api-implementation's own client before it — not run against a live tenant
- * while building this sample; there is no credential set available in this
- * environment to test against. Treat first use against a real environment as
- * an integration test, not an assumption, and read this module's README
- * "Known gaps" section first.
+ * Written against the shapes in the SDK's generated source (see
+ * {@code docs/sdk-jar-inspection/FINDINGS.md} and this module's README,
+ * "Upgrading to 0.2.0-alpha01"); read the README's "Known gaps" first.
  */
 @Component
 @ConditionalOnProperty(prefix = "go", name = "mode", havingValue = "live")
@@ -99,16 +102,8 @@ public class GoSdkClient implements GoClient {
     private volatile Go goClient;
     private volatile String goClientToken;
 
-    /**
-     * Shared across every {@code Go} instance this client builds (see
-     * {@link #currentGoClient}) — it holds no per-token state, only the
-     * thread-local buffer {@link #fetchGoState} reads right after each
-     * {@code journey/state/fetch} call. See {@link RawStateBodyCapturingHttpClient}'s
-     * javadoc and {@link SdkInteractionMapper}'s for why this exists: the
-     * SDK's typed response for that one operation silently drops the
-     * journey decision and per-module results.
-     */
-    private final RawStateBodyCapturingHttpClient rawStateHttpClient = new RawStateBodyCapturingHttpClient();
+    /** Shared across every {@code Go} instance this client builds; stateless. */
+    private final TimeoutHttpClient httpClient = new TimeoutHttpClient();
 
     public GoSdkClient(GoSdkProperties properties, GoSdkAuthService authService,
                         SdkInteractionMapper mapper, AppConfigProperties appConfig) {
@@ -120,7 +115,7 @@ public class GoSdkClient implements GoClient {
 
     private synchronized Go currentGoClient(String token) {
         if (goClient == null || !token.equals(goClientToken)) {
-            Go.Builder builder = Go.builder().customerAccess(token).client(rawStateHttpClient);
+            Go.Builder builder = Go.builder().customerAccess(token).client(httpClient);
             // usesDocumentedRegion(): region is one of eu/us/au and no explicit
             // base-url override is configured, so serverIndex(0/1/2) — confirmed
             // to map exactly onto the documented hosts, FINDINGS.md Q7 — is
@@ -129,7 +124,7 @@ public class GoSdkClient implements GoClient {
             if (properties.usesDocumentedRegion()) {
                 builder.serverIndex(properties.serverIndex());
             } else {
-                builder.serverURL(properties.baseUrl());
+                builder.serverURL(properties.sdkServerUrl());
             }
             goClient = builder.build();
             goClientToken = token;
@@ -140,16 +135,34 @@ public class GoSdkClient implements GoClient {
     @Override
     public GoStartResult startJourney(String resourceId, Map<String, Object> prefill, String scenarioHint) {
         StartJourneyRequest request = mapper.toStartRequest(resourceId, prefill);
-        StartJourneyResponse response = call(() -> authorized(token -> currentGoClient(token).journeys().start(request)));
-        String instanceId = response.twoHundredApplicationJsonObject()
-                .map(b -> b.instanceId())
-                .or(() -> response.twoHundredAndOneApplicationJsonObject().map(b -> b.instanceId()))
+        StartJourneyResponse response = call(() -> authorized(token -> currentGoClient(token).journeys().start(request)),
+                Map.of(), GoSdkClient::startRefusal);
+        String instanceId = response.journeyStartResponse()
+                .map(JourneyStartResponse::instanceId)
                 .orElse(null);
         if (instanceId == null) {
             throw OnboardingException.upstreamUnavailable("Could not start your verification. Try again shortly.");
         }
         SubmitInteractionResponseAlias first = fetchInteractionInternal(instanceId);
         return new GoStartResult(instanceId, first.status(), first.interaction());
+    }
+
+    /**
+     * How a refused journey/start reaches the customer: api-implementation's
+     * {@code GoApiClient.startRefusal}, without its test-scenario branches,
+     * since this client can't start a saved scenario (the SDK can't send
+     * {@code x-gbg-scenario}). There is no session yet, so {@code call()}'s
+     * default for a 404 or 410, "Your session has ended", would mislead: Go
+     * doesn't have the journey this market names. Retrying can't fix that, so
+     * it isn't retryable. Null leaves anything else to {@code call()}.
+     */
+    static OnboardingException startRefusal(int status) {
+        if (status == 404 || status == 410) {
+            log.error("GBG Go answered journey/start with {}. Check this market's app.resource-id names "
+                    + "a published journey.", status);
+            return OnboardingException.upstreamMisconfigured("Could not start your verification.");
+        }
+        return null;
     }
 
     @Override
@@ -169,45 +182,128 @@ public class GoSdkClient implements GoClient {
 
     private SubmitInteractionResponseAlias fetchInteractionInternal(String instanceId) {
         FetchInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
-                .fetch(new FetchInteractionRequest(instanceId), new FetchInteractionSecurity(token))));
+                .fetch(interactionSecurity(token), null, FetchInteractionRequestBody.builder().instanceId(instanceId).build())));
         FetchInteractionResponseBody oneOf = response.oneOf().orElse(null);
         if (oneOf == null) {
             throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
         }
 
-        Optional<FetchInteractionError> error = oneOf.fetchInteractionError();
-        if (error.isPresent()) {
-            throw classifyInBandError(error.get());
+        // 0.2.0-alpha02 picks the union member by the response's `view`
+        // property ("full" or "slim"), which the API reference marks as
+        // required. A body without it arrives as UnknownFetchInteractionResponseBody:
+        // that is read as the full view this call asks for, unless it is an
+        // in-band error.
+        JsonNode json = oneOf instanceof UnknownFetchInteractionResponseBody unknown ? unknown.asJson() : null;
+        OnboardingException inBand = inBandError(json);
+        if (inBand != null) {
+            log.warn("GBG Go fetch-interaction returned an in-band error for instance {}: {}", instanceId, json);
+            throw inBand;
         }
-
-        Optional<ResponseBody1> full = oneOf.responseBody1();
+        Optional<InteractionFetchResponse> full = oneOf instanceof InteractionFetchResponse fullView ? Optional.of(fullView)
+                : oneOf instanceof SlimInteractionFetchResponse slim ? Optional.of(fromSlim(slim))
+                : asFullView(json, InteractionFetchResponse.class, "fetch-interaction", instanceId);
         if (full.isPresent()) {
-            ResponseBody1 body = full.get();
+            InteractionFetchResponse body = full.get();
             // Always overwritten, empty when Go omits the field: keeping the
             // last non-null value let a stale Side2Required outlive the
             // document screen and route the selfie into side2Image.
-            List<String> outstanding = body.outstanding().orElse(List.of());
+            List<String> outstanding = SdkInteractionMapper.stringList(body.outstanding().orElse(null));
             lastOutstandingByInstance.put(instanceId, outstanding);
-            lastInstructionsByInstance.put(instanceId, body.instructions().orElse(List.of()));
+            List<String> instructions = SdkInteractionMapper.stringList(body.instructions().orElse(null));
+            lastInstructionsByInstance.put(instanceId, instructions);
             List<String> collectable = SdkInteractionMapper.collectableRefs(body);
             lastCollectableByInstance.put(instanceId, collectable.isEmpty() ? outstanding : collectable);
+            forgetBackOnceDone(instanceId, instructions);
             Interaction interaction = mapper.toInteraction(body, completedStages(instanceId));
+            // Refs and instructions only, never values: enough to see why a
+            // screen was chosen.
+            log.debug("Fetched interaction: instance={} journey={} processing={} outstanding={} instructions={} "
+                            + "collectable={} completed={} -> screen kind={} stage={}",
+                    instanceId, body.journey().status(), body.processing().orElse(null), outstanding,
+                    lastInstructionsByInstance.get(instanceId), collectable, completedStages(instanceId),
+                    interaction.kind(), interaction.stage());
             return new SubmitInteractionResponseAlias(statusFrom(interaction), interaction);
         }
 
-        Optional<ResponseBody2> stub = oneOf.responseBody2();
-        if (stub.isPresent()) {
-            ResponseBody2 body = stub.get();
-            // No interactionId field on this shape — the raw client's own
-            // fallback (interactionId, else instanceId) applies identically.
-            Interaction interaction = mapper.processingOrTerminalWithoutInteraction(
-                    body.instanceId(), body.journey().status().value(), body.processing().orElse(false));
-            return new SubmitInteractionResponseAlias(statusFrom(interaction), interaction);
-        }
-
-        // asJson() — a shape none of the three known union members matched.
-        log.warn("Fetch-interaction response matched no known shape for instance {}", instanceId);
+        log.warn("Fetch-interaction response matched no expected shape for instance {}: {}", instanceId, json);
         throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
+    }
+
+    /**
+     * A 200 body of the form {@code {"status": "error", "code": 410, ...}},
+     * classified by its code like an HTTP error; null for anything else.
+     * Package-private for {@code GoSdkClientInBandErrorTest}.
+     */
+    static OnboardingException inBandError(JsonNode json) {
+        if (json == null || !"error".equalsIgnoreCase(json.path("status").asText())) return null;
+        JsonNode code = json.path("code");
+        return code.canConvertToInt() || code.isTextual() && code.asText().matches("\\d+")
+                ? classifyCode(code.asInt())
+                : OnboardingException.upstreamUnavailable("Something went wrong on our end. Try again shortly.");
+    }
+
+    /**
+     * A response body that carried no {@code view} property, read as the full
+     * view: {@code view: "full"} is added and the body deserialized as
+     * {@code type}. Empty if it doesn't fit, or isn't an object. Logged
+     * either way, since it means Go's response no longer matches the API
+     * reference, which marks {@code view} as required.
+     */
+    static <T> Optional<T> asFullView(JsonNode json, Class<T> type, String operation, String instanceId) {
+        if (json == null || !json.isObject() || json.has("view")) return Optional.empty();
+        try {
+            T full = JSON.getMapper().treeToValue(((com.fasterxml.jackson.databind.node.ObjectNode) json.deepCopy())
+                    .put("view", "full"), type);
+            log.warn("GBG Go {} response for instance {} has no `view` property; read as the full view", operation, instanceId);
+            return Optional.of(full);
+        } catch (Exception e) {
+            log.warn("GBG Go {} response for instance {} has no `view` property and does not fit the full view: {}",
+                    operation, instanceId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** The slim variant's fields that the mapper reads, as the full variant. */
+    static InteractionFetchResponse fromSlim(SlimInteractionFetchResponse slim) {
+        return InteractionFetchResponse.builder()
+                .view(InteractionFetchResponseView.FULL)
+                .instanceId(slim.instanceId())
+                .interactionId(slim.interactionId().orElse(null))
+                .journey(new InteractionFetchResponseJourney(slim.journey().status().value()))
+                .interaction(slim.interaction().orElse(null))
+                .outstanding(slim.outstanding().orElse(null))
+                .instructions(slim.instructions().orElse(null))
+                .processing(slim.processing().orElse(null))
+                // Typed on the slim view, untyped on the full one; carried
+                // over so a failed result.status reads the same on either.
+                .result(slim.result()
+                        .map(result -> JSON.getMapper().convertValue(result,
+                                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}))
+                        .orElse(null))
+                .build();
+    }
+
+    /**
+     * The interaction token. 0.2.0's security classes carry two bearer
+     * schemes ({@code customerAccess}, {@code interactionAccess}) where 0.1.0
+     * had one; this sets the same one 0.1.0's single-argument constructor did.
+     */
+    private static FetchInteractionSecurity interactionSecurity(String token) {
+        return FetchInteractionSecurity.builder().interactionAccess(token).build();
+    }
+
+    /**
+     * Drops the back-submitted marker once Go says {@code Side2Done}. The
+     * marker only has to outlive the stale {@code Side2Required} on the first
+     * fetch after the back is submitted; kept for good, it would also hide a
+     * later request for the back that comes as the instruction alone.
+     */
+    private void forgetBackOnceDone(String instanceId, List<String> instructions) {
+        if (!SdkInteractionMapper.side2Done(instructions)) return;
+        Set<String> done = completedStagesByInstance.get(instanceId);
+        if (done != null) {
+            mapper.secondSideMarker().ifPresent(done::remove);
+        }
     }
 
     /** Stage names already submitted on this instance; never null. */
@@ -225,7 +321,8 @@ public class GoSdkClient implements GoClient {
 
         SubmitInteractionRequest request = mapper.toSubmitRequest(instanceId, interactionId, payload, appConfig.consentUrl());
         SubmitInteractionResponse response = call(() -> authorized(token -> currentGoClient(token).interactions()
-                .submit(request, new SubmitInteractionSecurity(token))), mapper.fieldsByGoPath(payload));
+                .submit(request, SubmitInteractionSecurity.builder().interactionAccess(token).build())),
+                mapper.fieldsByGoPath(payload));
         throwIfSubmitError(response);
 
         if (submittedStage != null) {
@@ -233,26 +330,37 @@ public class GoSdkClient implements GoClient {
                     .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new LinkedHashSet<>()))
                     .add(submittedStage);
         }
+        // The back shares the document stage, so it is recorded separately:
+        // Go's next fetch can still say Side2Required (see
+        // SdkInteractionMapper.side2Required).
+        if (payload.containsKey("documentBack")) {
+            mapper.secondSideMarker().ifPresent(marker -> completedStagesByInstance
+                    .computeIfAbsent(instanceId, k -> Collections.synchronizedSet(new LinkedHashSet<>()))
+                    .add(marker));
+        }
         return fetchInteraction(instanceId);
     }
 
     @Override
     public StateResponse fetchState(String instanceId) {
-        GoState state = fetchGoState(instanceId);
-        RecordResponse asRecord = mapper.toRecord(state.body(), state.rawStateBody());
-        String goStatus = state.body().status().value();
+        StateFetchResponse state = fetchGoState(instanceId);
+        RecordResponse asRecord = mapper.toRecord(state);
+        String goStatus = state.status();
 
         // Same three-way terminal check as GoApiClient.fetchState — see its
         // javadoc for the full rationale (Completed / Failed-or-Error / a
         // decision reached with every module settled, because the Northbank
         // journey settles on `refer` without ever reaching status Completed).
-        boolean carriesRealResult = mapper.carriesRealResult(state.body(), state.rawStateBody());
+        boolean carriesRealResult = mapper.carriesRealResult(state);
         boolean everyModuleSettled = !asRecord.moduleRuns().isEmpty()
                 && asRecord.moduleRuns().stream().noneMatch(run -> ModuleState.RUNNING.equals(run.state()));
         boolean decided = carriesRealResult && everyModuleSettled;
 
         JourneyStatus status = "Completed".equalsIgnoreCase(goStatus)
                 || SdkInteractionMapper.isFailed(goStatus)
+                // A failed result.status is terminal too: Go documents it as
+                // authoritative, and an abandoned journey will not move again.
+                || mapper.resultFailed(state)
                 || decided
                 ? JourneyStatus.COMPLETED
                 : JourneyStatus.IN_PROGRESS;
@@ -261,55 +369,44 @@ public class GoSdkClient implements GoClient {
 
     @Override
     public RecordResponse fetchRecord(String instanceId) {
-        GoState state = fetchGoState(instanceId);
-        return mapper.toRecord(state.body(), state.rawStateBody());
+        return mapper.toRecord(fetchGoState(instanceId));
     }
 
     /**
-     * @param rawStateBody the same response's wire bytes, parsed independently
-     *                      of the SDK's typed model — see
-     *                      {@link RawStateBodyCapturingHttpClient} and
-     *                      {@link SdkInteractionMapper}'s javadoc for why.
-     *                      Never null; empty if the raw bytes could not be
-     *                      captured or parsed, in which case callers fall
-     *                      back to {@code body.data()} (itself always empty
-     *                      in practice, but cheap to try).
+     * The full (default) state view. 0.1.0 dropped this response's
+     * {@code result} and per-step detail, which needed a raw-body capture to
+     * recover; 0.2.0's {@code StateFetchResponse} keeps both.
      */
-    private record GoState(GetJourneyStateResponseBody body, Map<String, Object> rawStateBody) {
-    }
-
-    private GoState fetchGoState(String instanceId) {
-        try {
-            GetJourneyStateResponse response = call(() -> authorized(token -> currentGoClient(token).journeys()
-                    .getState(new GetJourneyStateRequest(instanceId))));
-            GetJourneyStateResponseBody body = response.object().orElse(null);
-            if (body == null) {
-                throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
+    private StateFetchResponse fetchGoState(String instanceId) {
+        GetJourneyStateResponse response = call(() -> authorized(token -> currentGoClient(token).journeys()
+                .getState(null, GetJourneyStateRequestBody.builder().instanceId(instanceId).build())));
+        GetJourneyStateResponseBody body = response.oneOf().orElse(null);
+        if (body instanceof StateFetchResponse full) {
+            return full;
+        }
+        // The slim variant has no per-step status or timing, so it cannot
+        // stand in for the full one. Since alpha02 the SDK picks the variant
+        // by `view`, so this means Go itself answered with the slim view.
+        if (body instanceof SlimStateFetchResponse slim) {
+            log.warn("Journey-state response for instance {} is the slim view, "
+                    + "which lacks the step detail the record needs: {}", instanceId, slim);
+        } else {
+            // No `view` property: read as the full view this call asks for,
+            // unless it is an in-band error (see fetchInteractionInternal).
+            JsonNode json = body instanceof UnknownGetJourneyStateResponseBody unknown ? unknown.asJson() : null;
+            OnboardingException inBand = inBandError(json);
+            if (inBand != null) {
+                log.warn("GBG Go journey-state returned an in-band error for instance {}: {}", instanceId, json);
+                throw inBand;
             }
-            Map<String, Object> rawStateBody = rawStateHttpClient.takeLastStateFetchBody()
-                    .map(this::parseRawStateBody)
-                    .orElse(Map.of());
-            return new GoState(body, rawStateBody);
-        } finally {
-            // takeLastStateFetchBody() already clears on the success path above;
-            // this is the failure path's clear — call() throwing (or body being
-            // null) skips straight past it otherwise, leaving the captured bytes
-            // pinned to this pooled thread's RawStateBodyCapturingHttpClient
-            // ThreadLocal until some later call on the same thread happens to
-            // overwrite or read it. A second read here is a safe no-op once the
-            // success path has already cleared it.
-            rawStateHttpClient.takeLastStateFetchBody();
+            Optional<StateFetchResponse> asFull = asFullView(json, StateFetchResponse.class, "journey-state", instanceId);
+            if (asFull.isPresent()) {
+                return asFull.get();
+            }
+            log.warn("Journey-state response matched no expected shape for instance {}: {}",
+                    instanceId, json == null ? "no body" : json);
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> parseRawStateBody(byte[] bytes) {
-        try {
-            return JSON.getMapper().readValue(bytes, Map.class);
-        } catch (Exception e) {
-            log.warn("Could not parse the raw journey/state/fetch body; falling back to the SDK's own (empty) data map", e);
-            return Map.of();
-        }
+        throw OnboardingException.upstreamUnavailable("Could not read your verification status. Try again shortly.");
     }
 
     /**
@@ -336,9 +433,11 @@ public class GoSdkClient implements GoClient {
         }
         List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
 
-        if (lastInstructionsByInstance.getOrDefault(instanceId, List.of()).stream()
-                        .anyMatch("Side2Required"::equalsIgnoreCase)
-                || outstanding.contains("PrimaryDocument/side2Image")) {
+        // The same rule that chose the screen, so a back-of-document screen
+        // and the capture taken on it can't disagree: in particular, a
+        // side2Image listed before the front is in leaves this capture as the
+        // front.
+        if (mapper.awaitingSecondSide(outstanding, lastInstructionsByInstance.get(instanceId), completedStages(instanceId))) {
             log.debug("Capture routed as DOCUMENT BACK: instance={} outstanding={}", instanceId, outstanding);
             Map<String, Object> back = new LinkedHashMap<>(data);
             back.remove("attachmentRef");
@@ -372,13 +471,6 @@ public class GoSdkClient implements GoClient {
     }
 
     /**
-     * Ported from {@code GoApiClient.call()} against
-     * {@link APIException} instead of {@code RestClientResponseException} —
-     * the exception type the spike confirmed every generated operation
-     * actually throws on 4XX/5XX (FINDINGS.md Q1; {@code GoException} is its
-     * abstract base, {@code APIException} the concrete class).
-     */
-    /**
      * Runs {@code request} with the current access token, retrying once with a
      * freshly minted one if Go answers 401/403. Without the retry, a token Go
      * has stopped accepting (revoked, rotated early, clock skew) stays cached
@@ -390,7 +482,7 @@ public class GoSdkClient implements GoClient {
         String token = authService.accessToken();
         try {
             return request.apply(token);
-        } catch (APIException e) {
+        } catch (GoException e) {
             if (e.code() != 401 && e.code() != 403) {
                 throw e;
             }
@@ -404,17 +496,36 @@ public class GoSdkClient implements GoClient {
         return call(request, Map.of());
     }
 
+    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath) {
+        return call(request, fieldsByGoPath, status -> null);
+    }
+
+    /** A caller's own reading of a status Go refused with; null leaves it to {@code call()}'s defaults. */
+    @FunctionalInterface
+    interface Refusal {
+        OnboardingException classify(int status);
+    }
+
     /**
+     * Ported from {@code GoApiClient.call()}. Catches {@link GoException}, the
+     * base of both exceptions 0.2.0 throws on 4XX/5XX: {@code ErrorResponse}
+     * for the documented error codes and {@code APIException} for the rest.
+     *
      * @param fieldsByGoPath for a submit, where each submitted field landed in
      *                       the request (see {@link SdkInteractionMapper#fieldsByGoPath}),
      *                       so a 400/422 can name the fields Go rejected.
+     * @param refusal        consulted first once Go has refused the call, after the token retry.
      */
-    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath) {
+    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath, Refusal refusal) {
         try {
             return request.get();
-        } catch (APIException e) {
+        } catch (GoException e) {
             String body = e.bodyAsString().orElse("");
             log.warn("GBG Go call failed: {} {}", e.code(), body);
+            OnboardingException refused = refusal.classify(e.code());
+            if (refused != null) {
+                throw refused;
+            }
             if ((e.code() == 400 || e.code() == 422) && !fieldsByGoPath.isEmpty()) {
                 Map<String, String> fields = rejectedFields(goProblems(body), fieldsByGoPath);
                 if (!fields.isEmpty()) {
@@ -431,37 +542,23 @@ public class GoSdkClient implements GoClient {
     }
 
     /**
-     * {@code FetchInteractionResponseBody} can carry an in-band error object
-     * on an otherwise-200 response (a {@code oneOf} branch distinct from an
-     * {@link APIException}, which the SDK reserves for 4XX/5XX transport
-     * errors) — classified the same way.
-     */
-    private OnboardingException classifyInBandError(FetchInteractionError error) {
-        log.warn("GBG Go fetch-interaction returned an in-band error: {} {} {}",
-                error.status(), error.code(), error.message());
-        return classifyCode((int) error.code());
-    }
-
-    /**
-     * {@code SubmitInteractionResponseBody} carries the same kind of in-band
-     * error on an otherwise-200 submit response — previously discarded
-     * entirely, which let a rejected submission (e.g. a stale interactionId)
-     * be marked completed and reported to the caller as a success anyway.
-     */
-    private OnboardingException classifyInBandError(SubmitInteractionError error) {
-        log.warn("GBG Go submit-interaction returned an in-band error: {} {} {}",
-                error.status(), error.code(), error.message());
-        return classifyCode((int) error.code());
-    }
-
-    /**
-     * Package-private so {@code GoSdkClientSubmitInteractionErrorTest} can
-     * exercise it directly against a hand-built {@link SubmitInteractionResponse},
-     * the same way {@link #call} is tested without a live Go call.
+     * A 200 submit is only a success if its body says so. 0.1.0 modelled an
+     * in-band error variant with a code; 0.2.0's {@code InteractionSubmitResponse}
+     * has only {@code status} (an open enum whose one known value is
+     * {@code success}), so anything else is treated as an upstream failure —
+     * never marked completed and reported as a success.
+     *
+     * <p>Package-private so {@code GoSdkClientSubmitInteractionErrorTest} can
+     * exercise it directly against a hand-built {@link SubmitInteractionResponse}.
      */
     void throwIfSubmitError(SubmitInteractionResponse response) {
-        if (response.oneOf().orElse(null) instanceof SubmitInteractionError error) {
-            throw classifyInBandError(error);
+        String status = response.interactionSubmitResponse()
+                .map(InteractionSubmitResponse::status)
+                .map(InteractionSubmitResponseStatus::value)
+                .orElse(null);
+        if (!InteractionSubmitResponseStatus.SUCCESS.value().equals(status)) {
+            log.warn("GBG Go submit-interaction answered 200 without success status: {}", status);
+            throw OnboardingException.upstreamUnavailable("Something went wrong on our end. Try again shortly.");
         }
     }
 

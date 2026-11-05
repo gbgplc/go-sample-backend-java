@@ -74,6 +74,66 @@ class SdkSubmitRequestTest {
                 assertThat(wire.at("/" + path.replace('.', '/')).isMissingNode()).as(path).isFalse());
     }
 
+    /** A ref only resolves by its leaf when the leaf's entry belongs to the same domain element. */
+    @Test
+    void aPreviousAddressComponentDoesNotOverwriteTheCurrentAddress() throws Exception {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("PreviousAddresses/postalCode", "OX1 1AA");
+        data.put("CurrentAddress/postalCode", "SW1A 2AA");
+
+        JsonNode wire = wire(data);
+
+        assertThat(participants(wire)).containsExactly("PreviousAddresses", "CurrentAddress");
+        assertThat(wire.at("/context/subject/identity/currentAddress/postalCode").asText()).isEqualTo("SW1A 2AA");
+        assertThat(wire.at("/context/subject/identity/previousAddresses/0/postalCode").asText()).isEqualTo("OX1 1AA");
+    }
+
+    /** Each used to match nothing and be dropped. */
+    @Test
+    void aPreviousAddressesComponentsLandTogetherInItsOwnEntry() throws Exception {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("PreviousAddresses/building", "1");
+        data.put("PreviousAddresses/postalCode", "OX1 1AA");
+        data.put("PreviousAddresses/country", "United Kingdom");
+
+        JsonNode wire = wire(data);
+        Map<String, String> paths = mapper.fieldsByGoPath(data);
+
+        assertThat(participants(wire)).containsOnly("PreviousAddresses");
+        JsonNode previous = wire.at("/context/subject/identity/previousAddresses");
+        assertThat(previous.size()).isEqualTo(1);
+        assertThat(previous.at("/0/building").asText()).isEqualTo("1");
+        assertThat(previous.at("/0/postalCode").asText()).isEqualTo("OX1 1AA");
+        assertThat(previous.at("/0/country").asText()).isEqualTo("GBR");
+        paths.keySet().forEach(path ->
+                assertThat(wire.at("/" + path.replace('.', '/')).isMissingNode()).as(path).isFalse());
+    }
+
+    /**
+     * The free-text previous address joins its components in one entry,
+     * whichever key comes first, so a Go error on either path names the
+     * field that was sent. It used to append a second entry while reporting
+     * index 0 for both.
+     */
+    @Test
+    void aFreeTextPreviousAddressAndItsComponentsShareOneEntry() throws Exception {
+        for (boolean freeTextFirst : new boolean[]{true, false}) {
+            Map<String, Object> data = new LinkedHashMap<>();
+            if (freeTextFirst) data.put("PreviousAddresses", "1 Old Road");
+            data.put("PreviousAddresses/postalCode", "AB1 2CD");
+            if (!freeTextFirst) data.put("PreviousAddresses", "1 Old Road");
+
+            JsonNode previous = wire(data).at("/context/subject/identity/previousAddresses");
+            Map<String, String> paths = mapper.fieldsByGoPath(data);
+
+            assertThat(previous.size()).as("freeTextFirst=%s", freeTextFirst).isEqualTo(1);
+            assertThat(previous.at("/0/addressString").asText()).isEqualTo("1 Old Road");
+            assertThat(previous.at("/0/postalCode").asText()).isEqualTo("AB1 2CD");
+            assertThat(paths).containsEntry("context.subject.identity.previousAddresses.0.addressString", "PreviousAddresses")
+                    .containsEntry("context.subject.identity.previousAddresses.0.postalCode", "PreviousAddresses/postalCode");
+        }
+    }
+
     /** The error body is the one Go actually returned for two bad emails (live tenant, 2026-09-29). */
     @Test
     void goValidationProblemsMapBackToTheSubmittedFields() {
