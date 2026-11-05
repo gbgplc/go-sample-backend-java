@@ -1,7 +1,7 @@
 # Onboarding service (Java) — SDK implementation
 
 One of two implementations in this repo: this one integrates with GBG Go v2
-via the official Java Core SDK, `com.gbg:go-core-sdk` (`0.2.0`). See `../api-implementation/` for the sibling built on
+via the official Java Core SDK, `com.gbg:go-core-sdk` (`0.2.1`). See `../api-implementation/` for the sibling built on
 hand-rolled HTTP, and the root `README.md` for how the two relate. The two
 serve the identical REST contract — a front end cannot tell which one it is
 talking to — and share every Go-agnostic package (`api/`, `session/`,
@@ -307,6 +307,19 @@ classifies it as before (410 → session expired, and so on). For submit,
 other status, or a missing body, as an upstream failure, and the stage is
 not marked completed. Real Go errors arrive as HTTP 4XX/5XX and are handled
 by `call()`.
+
+## Upgrading to 0.2.1
+
+A security release and a drop-in upgrade from 0.2.0: no code changes, and
+all 129 tests pass unchanged. The SDK's declared `jackson-databind` moves
+from 2.22.1, which has 7 known advisories, to 2.22.4. The only source change
+is `SDKConfiguration`'s version strings.
+
+Spring Boot's dependency management overrides the SDK's Jackson version,
+and 3.5.16 manages 2.21.4, which has 11 advisories of its own. The pom
+therefore sets `jackson-bom.version` to 2.21.8, the patched release on
+Boot's tested minor line. Without it, upgrading the SDK would not change
+the Jackson this app runs.
 
 ## Upgrading to 0.2.0
 
