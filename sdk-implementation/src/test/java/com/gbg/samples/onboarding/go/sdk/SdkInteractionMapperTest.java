@@ -248,6 +248,56 @@ class SdkInteractionMapperTest {
         assertThat(interaction.kind()).isEqualTo(ScreenKind.FORM);
     }
 
+    /**
+     * A journey Go abandoned (deadlock) or errored can still carry its last
+     * interaction body. It is over, so the failure screen shows, not the next
+     * capture screen.
+     */
+    @Test
+    void aFailedResultStatusIsTerminalEvenWithAnInteractionBody() {
+        InteractionFetchResponse abandoned = InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
+                .instanceId("instance-1")
+                .journey(new InteractionFetchResponseJourney("InProgress"))
+                .interaction(Map.of("collects", List.of()))
+                .outstanding(List.of("Selfie/selfieImage"))
+                .result(Map.of("status", "abandoned"))
+                .build();
+
+        Interaction interaction = mapper.toInteraction(abandoned, Set.of("document"));
+
+        assertThat(interaction.kind()).isEqualTo(ScreenKind.RESULT);
+        assertThat(interaction.decision()).isEqualTo(com.gbg.samples.onboarding.api.dto.Decision.FAIL);
+    }
+
+    /** The slim view types its result; the full view the mapper reads gets it too. */
+    @Test
+    void aFailedResultStatusOnTheSlimViewIsTerminalToo() throws Exception {
+        com.gbg.gocore.models.SlimInteractionFetchResponse slim = com.gbg.gocore.utils.JSON.getMapper().readValue("""
+                {"view":"slim","instanceId":"instance-1","journey":{"status":"InProgress"},
+                 "interaction":{"collects":[]},"outstanding":["Selfie/selfieImage"],
+                 "result":{"status":"error"}}
+                """, com.gbg.gocore.models.SlimInteractionFetchResponse.class);
+
+        Interaction interaction = mapper.toInteraction(GoSdkClient.fromSlim(slim), Set.of("document"));
+
+        assertThat(interaction.kind()).isEqualTo(ScreenKind.RESULT);
+        assertThat(interaction.decision()).isEqualTo(com.gbg.samples.onboarding.api.dto.Decision.FAIL);
+    }
+
+    /** Go still working on the interaction gets the processing screen, not the next stage. */
+    @Test
+    void processingTrueShowsTheProcessingScreenEvenWithAnInteractionBody() {
+        InteractionFetchResponse processing = InteractionFetchResponse.builder().view(InteractionFetchResponseView.FULL)
+                .instanceId("instance-1")
+                .journey(new InteractionFetchResponseJourney("InProgress"))
+                .interaction(Map.of("collects", List.of()))
+                .outstanding(List.of("Selfie/selfieImage"))
+                .processing(true)
+                .build();
+
+        assertThat(mapper.toInteraction(processing, Set.of("document")).kind()).isEqualTo(ScreenKind.PROCESSING);
+    }
+
     private static InteractionFetchResponse fetchResponseWithOutstanding(List<String> outstanding) {
         return fetchResponse(outstanding, null);
     }

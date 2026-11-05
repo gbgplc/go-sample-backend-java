@@ -110,6 +110,26 @@ class GoSdkClientExceptionMappingTest {
         assertThat(rejected.fields()).containsEntry("PersonalEmail/email", "Invalid email address");
     }
 
+    /**
+     * journey/start has no session behind it, so a 404/410 means the market's
+     * resource id is wrong: not retryable, and not "Your session has ended".
+     */
+    @Test
+    void aStartRefusedWith404Or410IsMisconfiguredAndNotRetryable() {
+        for (int status : new int[]{404, 410}) {
+            OnboardingException ex = catchThrowableOfType(
+                    () -> client.call(() -> { throw apiException(status); }, java.util.Map.of(), GoSdkClient::startRefusal),
+                    OnboardingException.class);
+
+            assertThat(ex.code()).as("status %s", status).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+            assertThat(ex.retryable()).as("status %s", status).isFalse();
+        }
+        OnboardingException other = catchThrowableOfType(
+                () -> client.call(() -> { throw apiException(429); }, java.util.Map.of(), GoSdkClient::startRefusal),
+                OnboardingException.class);
+        assertThat(other.code()).isEqualTo(ErrorCode.RATE_LIMITED);
+    }
+
     @Test
     void anUnexpectedRuntimeExceptionAlsoMapsToUpstreamUnavailable() {
         OnboardingException ex = catchThrowableOfType(

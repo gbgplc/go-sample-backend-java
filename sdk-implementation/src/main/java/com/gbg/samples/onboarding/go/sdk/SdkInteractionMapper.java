@@ -195,11 +195,16 @@ public class SdkInteractionMapper {
         String goStatus = body.journey().status();
         String interactionId = body.interactionId().orElse(body.instanceId());
 
+        // Checked before anything else, as in DefaultInteractionMapper: a
+        // failed journey, or a failed result.status whatever the journey
+        // status says, will never move again. Left until after the interaction
+        // body, an abandoned journey still showed its last screen, and the
+        // customer kept submitting into it.
+        if (isFailed(goStatus) || resultFailed(body.result().orElse(null))) {
+            return failedInteraction(interactionId);
+        }
         if (body.interaction().isEmpty()) {
             return processingInteraction(interactionId);
-        }
-        if (isFailed(goStatus)) {
-            return failedInteraction(interactionId);
         }
 
         List<String> outstandingRaw = stringList(body.outstanding().orElse(null));
@@ -207,11 +212,11 @@ public class SdkInteractionMapper {
             return manualReviewInteraction(interactionId);
         }
 
-        // An interaction body means there is something to collect or the
-        // journey is pending customer input, so processing=false: mapStatus
-        // falls through "InProgress" to PENDING_INPUT and the code below
-        // picks a screen from `outstanding`/`collects`.
-        JourneyStatus status = mapStatus(goStatus, false);
+        // Go still working on this interaction (processing: true) gets the
+        // processing screen, the same rule as DefaultInteractionMapper;
+        // otherwise "InProgress" falls through to PENDING_INPUT and the code
+        // below picks a screen from `outstanding`/`collects`.
+        JourneyStatus status = mapStatus(goStatus, body.processing().orElse(false));
         if (status == JourneyStatus.COMPLETED) {
             // Defer to a processing screen and let the front end's /state poll
             // surface the real decision (journeys().getState()), as before.
@@ -239,7 +244,7 @@ public class SdkInteractionMapper {
         boolean side1Submitted = documentStage.isPresent() && completed.contains(documentStage.get().name());
 
         if (documentStage.isPresent() && side1Submitted) {
-            if (side2Required(outstandingRaw, instructions, completed.contains(secondSideMarker(documentStage.get())))) {
+            if (awaitingSecondSide(outstandingRaw, instructions, completed)) {
                 return toStagedInteraction(interactionId, documentStage.get().asSecondSide(),
                         outstanding, completed, requiredRefs);
             }
@@ -449,6 +454,33 @@ public class SdkInteractionMapper {
     }
 
     /**
+     * Whether the screen now showing is the back of the document: the front
+     * has been submitted and Go wants the back ({@link #side2Required}).
+     * {@code toInteraction} picks the screen with this and
+     * {@code GoSdkClient.resolveAttachment} routes the capture with it, so
+     * the two cannot disagree. Before the front is in, a {@code side2Image}
+     * that some journeys list from the first fetch does not count: the screen
+     * is the front, and its capture must go to Go as the front.
+     */
+    public boolean awaitingSecondSide(List<String> outstanding, List<String> instructions, Set<String> completed) {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .filter(stage -> completed.contains(stage.name()))
+                .map(stage -> side2Required(outstanding, instructions, completed.contains(secondSideMarker(stage))))
+                .orElse(false);
+    }
+
+    /**
+     * Whether Go has finished with the back: {@code Side2Done}. The caller
+     * then forgets that the back was submitted, so a later request for it
+     * that arrives as the instruction alone reopens the back screen.
+     */
+    static boolean side2Done(List<String> instructions) {
+        return instructions != null && instructions.stream().anyMatch("Side2Done"::equalsIgnoreCase);
+    }
+
+    /**
      * The entry {@code GoSdkClient} adds to an instance's completed stages once
      * the back of the document is submitted. The back shares the document
      * stage, so it has no stage name of its own; no screen-plan stage can
@@ -639,7 +671,12 @@ public class SdkInteractionMapper {
      * journey reports {@code abandoned} (gbggo4-demo, 2026-10-29).
      */
     public boolean resultFailed(StateFetchResponse state) {
-        Object status = state.result().map(result -> result.get("status")).orElse(null);
+        return resultFailed(state.result().orElse(null));
+    }
+
+    /** {@link #resultFailed(StateFetchResponse)} for any response's untyped {@code result}, null included. */
+    static boolean resultFailed(Map<String, Object> result) {
+        Object status = result == null ? null : result.get("status");
         return status != null
                 && ("error".equalsIgnoreCase(status.toString()) || "timeout".equalsIgnoreCase(status.toString())
                         || "abandoned".equalsIgnoreCase(status.toString()));
@@ -996,18 +1033,19 @@ public class SdkInteractionMapper {
         String gender;
         String mothersMaidenName;
         final Map<String, String> addressComponents = new LinkedHashMap<>();
-        /** Components of one previous address, built into the first previousAddresses[] entry. */
+        /**
+         * One previous address, free text ({@code addressString}) and
+         * components together, built into the only previousAddresses[] entry.
+         */
         final Map<String, String> previousAddressComponents = new LinkedHashMap<>();
         final List<SubmitInteractionIdentityPhone> phones = new ArrayList<>();
         final List<SubmitInteractionIdentityEmail> emails = new ArrayList<>();
         final List<SubmitInteractionIdentityIdNumber> idNumbers = new ArrayList<>();
-        final List<SubmitInteractionIdentityPreviousAddress> previousAddresses = new ArrayList<>();
 
         boolean hasAnyValue() {
             return firstName != null || lastNames != null || dateOfBirth != null || gender != null
                     || mothersMaidenName != null || !addressComponents.isEmpty() || !phones.isEmpty()
-                    || !emails.isEmpty() || !idNumbers.isEmpty() || !previousAddresses.isEmpty()
-                    || !previousAddressComponents.isEmpty();
+                    || !emails.isEmpty() || !idNumbers.isEmpty() || !previousAddressComponents.isEmpty();
         }
 
         private static SubmitInteractionIdentityPreviousAddress previousAddress(Map<String, String> components) {
@@ -1059,12 +1097,9 @@ public class SdkInteractionMapper {
             if (!phones.isEmpty()) b.phones(phones);
             if (!emails.isEmpty()) b.emails(emails);
             if (!idNumbers.isEmpty()) b.idNumbers(idNumbers);
-            if (!previousAddressComponents.isEmpty() || !previousAddresses.isEmpty()) {
-                // The components' entry first, at the index apply() reported for them.
-                List<SubmitInteractionIdentityPreviousAddress> all = new ArrayList<>();
-                if (!previousAddressComponents.isEmpty()) all.add(previousAddress(previousAddressComponents));
-                all.addAll(previousAddresses);
-                b.previousAddresses(all);
+            if (!previousAddressComponents.isEmpty()) {
+                // One entry, at the index apply() reported for every part of it.
+                b.previousAddresses(List.of(previousAddress(previousAddressComponents)));
             }
             return b.build();
         }
@@ -1222,10 +1257,12 @@ public class SdkInteractionMapper {
                     identity.idNumbers.add(new SubmitInteractionIdentityIdNumber("SSN", text, null));
                     return id + "idNumbers." + (identity.idNumbers.size() - 1) + ".idNumber";
                 }
+                // The free-text form joins the components of the same address
+                // in one entry, whichever key arrives first, so a Go error on
+                // either names the field that was sent.
                 case PREVIOUS_ADDRESS -> {
-                    identity.previousAddresses.add(
-                            SubmitInteractionIdentityPreviousAddress.builder().addressString(text).build());
-                    return id + "previousAddresses." + (identity.previousAddresses.size() - 1) + ".addressString";
+                    identity.previousAddressComponents.put("addressString", text);
+                    return id + "previousAddresses.0.addressString";
                 }
                 case PREVIOUS_ADDRESS_COMPONENT -> {
                     identity.previousAddressComponents.put(addressComponent, text);

@@ -135,7 +135,8 @@ public class GoSdkClient implements GoClient {
     @Override
     public GoStartResult startJourney(String resourceId, Map<String, Object> prefill, String scenarioHint) {
         StartJourneyRequest request = mapper.toStartRequest(resourceId, prefill);
-        StartJourneyResponse response = call(() -> authorized(token -> currentGoClient(token).journeys().start(request)));
+        StartJourneyResponse response = call(() -> authorized(token -> currentGoClient(token).journeys().start(request)),
+                Map.of(), GoSdkClient::startRefusal);
         String instanceId = response.journeyStartResponse()
                 .map(JourneyStartResponse::instanceId)
                 .orElse(null);
@@ -144,6 +145,24 @@ public class GoSdkClient implements GoClient {
         }
         SubmitInteractionResponseAlias first = fetchInteractionInternal(instanceId);
         return new GoStartResult(instanceId, first.status(), first.interaction());
+    }
+
+    /**
+     * How a refused journey/start reaches the customer: api-implementation's
+     * {@code GoApiClient.startRefusal}, without its test-scenario branches,
+     * since this client can't start a saved scenario (the SDK can't send
+     * {@code x-gbg-scenario}). There is no session yet, so {@code call()}'s
+     * default for a 404 or 410, "Your session has ended", would mislead: Go
+     * doesn't have the journey this market names. Retrying can't fix that, so
+     * it isn't retryable. Null leaves anything else to {@code call()}.
+     */
+    static OnboardingException startRefusal(int status) {
+        if (status == 404 || status == 410) {
+            log.error("GBG Go answered journey/start with {}. Check this market's app.resource-id names "
+                    + "a published journey.", status);
+            return OnboardingException.upstreamMisconfigured("Could not start your verification.");
+        }
+        return null;
     }
 
     @Override
@@ -190,9 +209,11 @@ public class GoSdkClient implements GoClient {
             // document screen and route the selfie into side2Image.
             List<String> outstanding = SdkInteractionMapper.stringList(body.outstanding().orElse(null));
             lastOutstandingByInstance.put(instanceId, outstanding);
-            lastInstructionsByInstance.put(instanceId, SdkInteractionMapper.stringList(body.instructions().orElse(null)));
+            List<String> instructions = SdkInteractionMapper.stringList(body.instructions().orElse(null));
+            lastInstructionsByInstance.put(instanceId, instructions);
             List<String> collectable = SdkInteractionMapper.collectableRefs(body);
             lastCollectableByInstance.put(instanceId, collectable.isEmpty() ? outstanding : collectable);
+            forgetBackOnceDone(instanceId, instructions);
             Interaction interaction = mapper.toInteraction(body, completedStages(instanceId));
             // Refs and instructions only, never values: enough to see why a
             // screen was chosen.
@@ -253,6 +274,12 @@ public class GoSdkClient implements GoClient {
                 .outstanding(slim.outstanding().orElse(null))
                 .instructions(slim.instructions().orElse(null))
                 .processing(slim.processing().orElse(null))
+                // Typed on the slim view, untyped on the full one; carried
+                // over so a failed result.status reads the same on either.
+                .result(slim.result()
+                        .map(result -> JSON.getMapper().convertValue(result,
+                                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}))
+                        .orElse(null))
                 .build();
     }
 
@@ -263,6 +290,20 @@ public class GoSdkClient implements GoClient {
      */
     private static FetchInteractionSecurity interactionSecurity(String token) {
         return FetchInteractionSecurity.builder().interactionAccess(token).build();
+    }
+
+    /**
+     * Drops the back-submitted marker once Go says {@code Side2Done}. The
+     * marker only has to outlive the stale {@code Side2Required} on the first
+     * fetch after the back is submitted; kept for good, it would also hide a
+     * later request for the back that comes as the instruction alone.
+     */
+    private void forgetBackOnceDone(String instanceId, List<String> instructions) {
+        if (!SdkInteractionMapper.side2Done(instructions)) return;
+        Set<String> done = completedStagesByInstance.get(instanceId);
+        if (done != null) {
+            mapper.secondSideMarker().ifPresent(done::remove);
+        }
     }
 
     /** Stage names already submitted on this instance; never null. */
@@ -393,9 +434,10 @@ public class GoSdkClient implements GoClient {
         List<String> outstanding = lastOutstandingByInstance.getOrDefault(instanceId, List.of());
 
         // The same rule that chose the screen, so a back-of-document screen
-        // and the capture taken on it can't disagree.
-        boolean backSubmitted = mapper.secondSideMarker().map(completedStages(instanceId)::contains).orElse(false);
-        if (SdkInteractionMapper.side2Required(outstanding, lastInstructionsByInstance.get(instanceId), backSubmitted)) {
+        // and the capture taken on it can't disagree: in particular, a
+        // side2Image listed before the front is in leaves this capture as the
+        // front.
+        if (mapper.awaitingSecondSide(outstanding, lastInstructionsByInstance.get(instanceId), completedStages(instanceId))) {
             log.debug("Capture routed as DOCUMENT BACK: instance={} outstanding={}", instanceId, outstanding);
             Map<String, Object> back = new LinkedHashMap<>(data);
             back.remove("attachmentRef");
@@ -454,6 +496,16 @@ public class GoSdkClient implements GoClient {
         return call(request, Map.of());
     }
 
+    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath) {
+        return call(request, fieldsByGoPath, status -> null);
+    }
+
+    /** A caller's own reading of a status Go refused with; null leaves it to {@code call()}'s defaults. */
+    @FunctionalInterface
+    interface Refusal {
+        OnboardingException classify(int status);
+    }
+
     /**
      * Ported from {@code GoApiClient.call()}. Catches {@link GoException}, the
      * base of both exceptions 0.2.0 throws on 4XX/5XX: {@code ErrorResponse}
@@ -462,13 +514,18 @@ public class GoSdkClient implements GoClient {
      * @param fieldsByGoPath for a submit, where each submitted field landed in
      *                       the request (see {@link SdkInteractionMapper#fieldsByGoPath}),
      *                       so a 400/422 can name the fields Go rejected.
+     * @param refusal        consulted first once Go has refused the call, after the token retry.
      */
-    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath) {
+    <T> T call(Supplier<T> request, Map<String, String> fieldsByGoPath, Refusal refusal) {
         try {
             return request.get();
         } catch (GoException e) {
             String body = e.bodyAsString().orElse("");
             log.warn("GBG Go call failed: {} {}", e.code(), body);
+            OnboardingException refused = refusal.classify(e.code());
+            if (refused != null) {
+                throw refused;
+            }
             if ((e.code() == 400 || e.code() == 422) && !fieldsByGoPath.isEmpty()) {
                 Map<String, String> fields = rejectedFields(goProblems(body), fieldsByGoPath);
                 if (!fields.isEmpty()) {

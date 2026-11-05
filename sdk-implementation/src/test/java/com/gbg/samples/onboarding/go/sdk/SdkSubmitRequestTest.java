@@ -109,6 +109,31 @@ class SdkSubmitRequestTest {
                 assertThat(wire.at("/" + path.replace('.', '/')).isMissingNode()).as(path).isFalse());
     }
 
+    /**
+     * The free-text previous address joins its components in one entry,
+     * whichever key comes first, so a Go error on either path names the
+     * field that was sent. It used to append a second entry while reporting
+     * index 0 for both.
+     */
+    @Test
+    void aFreeTextPreviousAddressAndItsComponentsShareOneEntry() throws Exception {
+        for (boolean freeTextFirst : new boolean[]{true, false}) {
+            Map<String, Object> data = new LinkedHashMap<>();
+            if (freeTextFirst) data.put("PreviousAddresses", "1 Old Road");
+            data.put("PreviousAddresses/postalCode", "AB1 2CD");
+            if (!freeTextFirst) data.put("PreviousAddresses", "1 Old Road");
+
+            JsonNode previous = wire(data).at("/context/subject/identity/previousAddresses");
+            Map<String, String> paths = mapper.fieldsByGoPath(data);
+
+            assertThat(previous.size()).as("freeTextFirst=%s", freeTextFirst).isEqualTo(1);
+            assertThat(previous.at("/0/addressString").asText()).isEqualTo("1 Old Road");
+            assertThat(previous.at("/0/postalCode").asText()).isEqualTo("AB1 2CD");
+            assertThat(paths).containsEntry("context.subject.identity.previousAddresses.0.addressString", "PreviousAddresses")
+                    .containsEntry("context.subject.identity.previousAddresses.0.postalCode", "PreviousAddresses/postalCode");
+        }
+    }
+
     /** The error body is the one Go actually returned for two bad emails (live tenant, 2026-09-29). */
     @Test
     void goValidationProblemsMapBackToTheSubmittedFields() {
