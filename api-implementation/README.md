@@ -270,6 +270,11 @@ mvn test
   covering the idempotent-retry logic, screen-plan selection and module-
   verdict mapping, and that `application-meridian-health.yml`'s `screen-plan`
   block actually binds the content it looks like it does.
+- `GoApiClientSide2Test` drives `GoApiClient` against a stubbed Go through
+  the front, the back and the selfie, and checks which image slot each
+  capture is sent to: after Go's stale `Side2Required` following the back, a
+  failed back submit, `side2Image` listed before the front, and a request
+  for the back after `Side2Done`. sdk-implementation runs the same cases.
 
 ## What's a placeholder here
 

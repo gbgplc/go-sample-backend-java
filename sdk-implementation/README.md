@@ -6,7 +6,11 @@ version, `[0.2.1,)`; tested against `0.2.1`). See `../api-implementation/` for t
 hand-rolled HTTP, and the root `README.md` for how the two relate. The two
 serve the identical REST contract — a front end cannot tell which one it is
 talking to — and share every Go-agnostic package (`api/`, `session/`,
-`go/mock/`, `config/ScreenPlanProperties` and friends) byte-for-byte.
+`go/mock/`, `config/ScreenPlanProperties` and friends). The one difference
+there is api-implementation's test-scenarios mode (the scenario held on
+`Session`, and the "Test run" row `SessionService` adds to the record),
+which this module leaves out: the SDK can't send the `x-gbg-scenario`
+header that starts a saved scenario.
 
 The thin-proxy backend from *Market onboarding applications — front-end
 handoff*, section 1: holds the GBG Go client credentials, mints and refreshes
@@ -19,7 +23,7 @@ browser.
 ```
 com.gbg.samples.onboarding
 ├── api/            SessionController (the 7 REST endpoints) + error handling
-│   └── dto/         wire types — identical to api-implementation's, byte-for-byte
+│   └── dto/         wire types — the same shapes as api-implementation's
 ├── config/          app.*, go.*, session.*, screen-plan.* configuration properties
 ├── session/         Session, SessionStore — the session-to-instance mapping
 └── go/
@@ -168,8 +172,17 @@ others), plus suites replacing api-implementation's `DecidedStateTest` and
   both SDK exceptions, `APIException` and `ErrorResponse` (404/410 → session
   expired, 400/422 → validation failed, 429 → rate limited, everything else →
   upstream unavailable), plus an unrelated `RuntimeException` and a
-  pass-through `OnboardingException`. `call()` is left package-private
-  specifically so this test can reach it without a live Go call.
+  pass-through `OnboardingException`, and journey/start's own reading of a
+  404/410 (a misconfigured resource id, not an ended session). `call()` is
+  left package-private specifically so this test can reach it without a
+  live Go call.
+- **`GoSdkClientSide2Test`** — `GoSdkClient` through the real SDK against
+  `FakeGo`, a local HTTP stand-in for Go: which image slot each capture is
+  sent to across the front, the back and the selfie (including Go's stale
+  `Side2Required` after the back, a failed back submit, `side2Image` listed
+  before the front, and a request for the back after `Side2Done`), and a
+  journey/start refused with 404. api-implementation's
+  `GoApiClientSide2Test` runs the same cases.
 
 ## Known gaps in this SDK integration
 
@@ -262,23 +275,21 @@ change here, not just a config one — this is a real, structural regression
 in flexibility versus api-implementation, not a copy-paste gap.
 
 **(g) `sdk.tokens().generate()`'s server override is host-only — the fabric
-tenant's password grant may not work through the SDK at all.** This is a
-finding beyond anything FINDINGS.md checked. Reading the generated
-`PostAsTokenOauth2` operation class shows its request path is hardcoded to
-`/as/token.oauth2`; the `serverURL` parameter `Tokens.generate(request,
-serverURL)` accepts only replaces the scheme+host, never the path
-(`Utils.generateURL(this.baseUrl, "/as/token.oauth2")`, unconditionally).
-That matches the public platform's PingFederate endpoint exactly, so
-`client_credentials` works as expected. Whether the fabric nonprod tenant's
-Keycloak realm also happens to expose its token endpoint at that literal
-path is unknown and cannot be checked by reading the SDK alone — Keycloak
-realms conventionally use a `/realms/{realm}/protocol/openid-connect/token`-
-shaped path, which would **not** match. If so, `GoSdkAuthService` will fail
-to mint a token under the password grant no matter what `go.auth-url` is set
-to, and there is no code-level workaround given the SDK's fixed path — this
-would mean falling back to a raw HTTP mint for that one tenant shape only,
-same as api-implementation already does for every tenant. Try `client_credentials`
-tenants first; treat the password-grant path as genuinely at risk.
+tenant's password grant does not work through the SDK.** Reading the
+generated `PostAsTokenOauth2` operation class shows its request path is
+hardcoded to `/as/token.oauth2`; the `serverURL` parameter
+`Tokens.generate(request, serverURL)` accepts only replaces the
+scheme+host, never the path (`Utils.generateURL(this.baseUrl,
+"/as/token.oauth2")`, unconditionally). That matches the public platform's
+PingFederate endpoint exactly, so `client_credentials` works as expected.
+A fabric tenant's Keycloak realm uses
+`/realms/{realm}/protocol/openid-connect/token`, so every mint there is a 404
+with an empty body (confirmed on gbggo4-demo), whatever `go.auth-url` says.
+There is no code-level workaround given the SDK's fixed path: running live
+against such a tenant needs the token request forwarded to Keycloak in
+front of this service. `GoSdkProperties.authUrlProblem()` checks the
+configured path, and `GoSdkAuthService` logs it as an error at startup
+rather than leaving the first customer to find it.
 
 **(h) `go.scope` is inert under `client_credentials` via the SDK.**
 Minor, but worth noting: `ClientCredentialsGrantRequest.scope` is a
@@ -289,12 +300,16 @@ public platform (`gbg.token` is the only valid value there anyway) and
 irrelevant to the password grant, which never sent a scope on either
 implementation.
 
-**(i) A fetch with no interaction always shows the processing screen.**
-Under 0.1.0, a fetch with nothing to render came back as a separate shape
-with no `result`, so the decision could only come from `/state`. 0.2.0's
-`InteractionFetchResponse` does carry `result`, but the behaviour is left
-unchanged: a fetch with no `interaction` defers to a processing screen and
-the front end's `/state` poll surfaces the outcome. That is never a wrong
+**(i) A fetch with no interaction shows the processing screen, unless the
+journey has failed.** Under 0.1.0, a fetch with nothing to render came back
+as a separate shape with no `result`, so the decision could only come from
+`/state`. 0.2.0's `InteractionFetchResponse` carries `result` and
+`processing`, and both are now read as `DefaultInteractionMapper` reads
+them: a failed journey or a failed `result.status` (error, timeout,
+abandoned) shows the failure screen first, whether or not an interaction
+came with it, and `processing: true` shows the processing screen. Otherwise
+a fetch with no `interaction` still defers to a processing screen and the
+front end's `/state` poll surfaces the outcome; that is never a wrong
 answer, just occasionally one extra poll before the customer sees it.
 
 **(j) Submit no longer reports in-band errors with a code.**
@@ -314,6 +329,13 @@ by `call()`.
 The pom asks for `go-core-sdk` `[0.2.1,)`, so every build resolves the
 newest version published to Maven Central, alphas included. Maven checks
 Central for new versions once a day; `mvn -U` forces a check.
+
+Maven has no lockfile, so this includes pre-releases and new major
+versions, such as `0.3.0-alpha01` or `1.0.0`, which can have breaking
+changes, and two builds of the same commit can use different SDK versions.
+If a build breaks after an SDK release, run
+`mvn dependency:tree -Dincludes=com.gbg:go-core-sdk` to see which version
+it resolved.
 
 ## Upgrading to 0.2.1
 
@@ -368,8 +390,9 @@ view.
   new `documentTypeSelection` field. Still no catch-all for extra properties,
   so (e) is unchanged.
 - **Token errors.** A 400/401 from the token endpoint with a JSON body now
-  throws the new `OAuthErrorResponse`, a `GoException`, so it is classified
-  the same way as before.
+  throws the new `OAuthErrorResponse`, a `GoException` but not an
+  `APIException`. `GoSdkAuthService` catches `GoException`, so its status
+  and body are logged.
 - **New: `testScenarios()`** manages a journey's test scenarios, and
   `StartJourneyRequest` takes an inline `scenario` definition. The SDK has
   no way to send the `x-gbg-scenario` header, so a saved scenario can't be
