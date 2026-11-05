@@ -1,7 +1,8 @@
 # Onboarding service (Java) — SDK implementation
 
 One of two implementations in this repo: this one integrates with GBG Go v2
-via the official Java Core SDK, `com.gbg:go-core-sdk` (`0.2.1`). See `../api-implementation/` for the sibling built on
+via the official Java Core SDK, `com.gbg:go-core-sdk` (the newest published
+version, `[0.2.1,)`; tested against `0.2.1`). See `../api-implementation/` for the sibling built on
 hand-rolled HTTP, and the root `README.md` for how the two relate. The two
 serve the identical REST contract — a front end cannot tell which one it is
 talking to — and share every Go-agnostic package (`api/`, `session/`,
@@ -307,6 +308,12 @@ classifies it as before (410 → session expired, and so on). For submit,
 other status, or a missing body, as an upstream failure, and the stage is
 not marked completed. Real Go errors arrive as HTTP 4XX/5XX and are handled
 by `call()`.
+
+## SDK version
+
+The pom asks for `go-core-sdk` `[0.2.1,)`, so every build resolves the
+newest version published to Maven Central, alphas included. Maven checks
+Central for new versions once a day; `mvn -U` forces a check.
 
 ## Upgrading to 0.2.1
 

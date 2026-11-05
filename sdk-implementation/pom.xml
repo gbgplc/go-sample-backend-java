@@ -62,7 +62,8 @@
     <dependency>
       <groupId>com.gbg</groupId>
       <artifactId>go-core-sdk</artifactId>
-      <version>0.2.1</version>
+      <!-- Always the newest published release, alphas included -->
+      <version>[0.2.1,)</version>
     </dependency>
 
     <dependency>
