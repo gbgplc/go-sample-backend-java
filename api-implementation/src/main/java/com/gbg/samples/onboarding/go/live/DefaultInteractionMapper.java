@@ -234,8 +234,7 @@ public class DefaultInteractionMapper {
         boolean side1Submitted = documentStage.isPresent() && completed.contains(documentStage.get().name());
 
         if (documentStage.isPresent() && side1Submitted) {
-            if (side2Required(response.outstanding(), response.instructions(),
-                    completed.contains(secondSideMarker(documentStage.get())))) {
+            if (awaitingSecondSide(response.outstanding(), response.instructions(), completed)) {
                 return toStagedInteraction(interactionId, documentStage.get().asSecondSide(),
                         outstanding, completed, requiredRefs);
             }
@@ -569,6 +568,34 @@ public class DefaultInteractionMapper {
         }
         return !backSubmitted
                 && instructions != null && instructions.stream().anyMatch("Side2Required"::equalsIgnoreCase);
+    }
+
+    /**
+     * Whether the screen now showing is the back of the document: the front
+     * has been submitted and Go wants the back ({@link #side2Required}).
+     * {@code toInteraction} picks the screen with this and
+     * {@code GoApiClient.resolveAttachment} routes the capture with it, so
+     * the two cannot disagree. Before the front is in, a {@code side2Image}
+     * that some journeys list from the first fetch does not count: the screen
+     * is the front, and its capture must go to Go as the front.
+     */
+    public boolean awaitingSecondSide(List<String> outstanding, List<String> instructions,
+                                      java.util.Set<String> completed) {
+        return screenPlan.stages().stream()
+                .filter(stage -> stage.claimsRef("PrimaryDocument/side1Image"))
+                .findFirst()
+                .filter(stage -> completed.contains(stage.name()))
+                .map(stage -> side2Required(outstanding, instructions, completed.contains(secondSideMarker(stage))))
+                .orElse(false);
+    }
+
+    /**
+     * Whether Go has finished with the back: {@code Side2Done}. The caller
+     * then forgets that the back was submitted, so a later request for it
+     * that arrives as the instruction alone reopens the back screen.
+     */
+    static boolean side2Done(List<String> instructions) {
+        return instructions != null && instructions.stream().anyMatch("Side2Done"::equalsIgnoreCase);
     }
 
     /**

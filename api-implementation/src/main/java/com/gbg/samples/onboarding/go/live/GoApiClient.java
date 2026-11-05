@@ -310,8 +310,23 @@ public class GoApiClient implements GoClient {
         lastCollectableByInstance.put(instanceId, collectable.isEmpty()
                 ? (response.outstanding() == null ? List.of() : response.outstanding())
                 : collectable);
+        forgetBackOnceDone(instanceId, response.instructions());
         Interaction interaction = mapper.toInteraction(response, completedStages(instanceId));
         return new SubmitInteractionResponse(statusFrom(interaction), interaction);
+    }
+
+    /**
+     * Drops the back-submitted marker once Go says {@code Side2Done}. The
+     * marker only has to outlive the stale {@code Side2Required} on the first
+     * fetch after the back is submitted; kept for good, it would also hide a
+     * later request for the back that comes as the instruction alone.
+     */
+    private void forgetBackOnceDone(String instanceId, List<String> instructions) {
+        if (!DefaultInteractionMapper.side2Done(instructions)) return;
+        java.util.Set<String> done = completedStagesByInstance.get(instanceId);
+        if (done != null) {
+            mapper.secondSideMarker().ifPresent(done::remove);
+        }
     }
 
     /** Stage names already submitted on this instance; never null. */
@@ -475,9 +490,9 @@ public class GoApiClient implements GoClient {
         // completed, so the stage-based check below would read the capture as
         // the selfie and overwrite the wrong element. The same rule that chose
         // the screen, so a back-of-document screen and the capture taken on it
-        // can't disagree.
-        boolean backSubmitted = mapper.secondSideMarker().map(completedStages(instanceId)::contains).orElse(false);
-        if (DefaultInteractionMapper.side2Required(outstanding, lastInstructionsByInstance.get(instanceId), backSubmitted)) {
+        // can't disagree: in particular, a side2Image listed before the front
+        // is in leaves this capture as the front.
+        if (mapper.awaitingSecondSide(outstanding, lastInstructionsByInstance.get(instanceId), completedStages(instanceId))) {
             log.debug("Capture routed as DOCUMENT BACK: instance={} outstanding={}", instanceId, outstanding);
             Map<String, Object> back = new java.util.LinkedHashMap<>(data);
             back.remove("attachmentRef");
