@@ -29,6 +29,21 @@ class GoSdkPropertiesTest {
                 .isEqualTo("https://gw.example.com/go/v2/captain");
     }
 
+    private static GoSdkProperties withAuthUrl(String authUrl) {
+        return new GoSdkProperties("live", "eu", authUrl, "gbg.token", "client_credentials",
+                "id", "secret", null, null, null);
+    }
+
+    /** The SDK posts to /as/token.oauth2 whatever the path, so any other path is reported, not ignored. */
+    @Test
+    void anAuthUrlPathTheSdkCannotReachIsReported() {
+        assertThat(withAuthUrl("https://api.auth.gbgplc.com/as/token.oauth2").authUrlProblem()).isNull();
+        assertThat(withAuthUrl("https://api.auth.gbgplc.com/as/token.oauth2/").authUrlProblem()).isNull();
+        assertThat(withAuthUrl("https://keycloak.example.com/realms/demo/protocol/openid-connect/token").authUrlProblem())
+                .contains("/realms/demo/protocol/openid-connect/token", "/as/token.oauth2");
+        assertThat(withAuthUrl("not a url").authUrlProblem()).contains("not a valid URL");
+    }
+
     /** Matches the SDK's own SERVERS entry for eu, which the regional default is used in place of. */
     @Test
     void theRegionalDefaultMatchesTheSdksServerList() {

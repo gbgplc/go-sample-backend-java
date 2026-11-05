@@ -36,6 +36,25 @@ class GoSdkAuthServiceTest {
         assertThat(GoSdkAuthService.cacheSeconds(3600L)).isEqualTo(3570);
     }
 
+    /**
+     * A 400/401 with a JSON body arrives as OAuthErrorResponse, a GoException
+     * but not an APIException: its status and body must still be logged,
+     * since they are what say why the mint failed.
+     */
+    @Test
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    void aRejectedMintLogsGosStatusAndBody(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+        try (FakeGo auth = new FakeGo()) {
+            auth.reply("/as/token.oauth2", 401, "{\"error\":\"invalid_client\"}");
+            GoSdkAuthService service = new GoSdkAuthService(new GoSdkProperties("live", "eu",
+                    auth.url("/as/token.oauth2"), "gbg.token", "client_credentials", "id", "secret", null, null, null));
+
+            assertThatThrownBy(service::accessToken)
+                    .isInstanceOf(com.gbg.samples.onboarding.api.OnboardingException.class);
+            assertThat(output.getOut() + output.getErr()).contains("401", "invalid_client");
+        }
+    }
+
     @Test
     void thePasswordGrantAlsoNeedsUsernameAndPassword() {
         assertThatThrownBy(() -> GoSdkAuthService.requireCredentials(props("password", "id", "secret", "", null)))
