@@ -40,16 +40,16 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *       rather than {@code serverIndex(...)}.</li>
  * </ul>
  *
- * <b>Known SDK limitation (see sdk-implementation/README.md, "Known gaps"):</b>
+ * <b>Known SDK limitation (see sdk-implementation/README.md, "Known gaps" (g)):</b>
  * {@code sdk.tokens().generate()} hardcodes the token endpoint's path to
  * {@code /as/token.oauth2} (verified by reading the generated
  * {@code PostAsTokenOauth2} operation class) and only lets a caller override
  * the <em>host</em> via a {@code serverURL} parameter, not the full path. That
- * matches the public platform's PingFederate host exactly. It is unverified
- * whether the fabric nonprod tenant's real Keycloak token endpoint also lives
- * at that exact path — if it doesn't, {@code GoSdkAuthService} will fail to
- * mint a token under the password grant no matter what {@link #authUrl} is set
- * to, because the SDK ignores everything in it except the scheme+host.
+ * matches the public platform's PingFederate host exactly. A fabric nonprod
+ * tenant's Keycloak realm does not live at that path (confirmed on
+ * gbggo4-demo: every mint is a 404), so {@code GoSdkAuthService} cannot mint a
+ * token there whatever {@link #authUrl} is set to; {@link #authUrlProblem}
+ * says so at startup.
  */
 @ConfigurationProperties(prefix = "go")
 public record GoSdkProperties(
@@ -78,6 +78,20 @@ public record GoSdkProperties(
             return baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
         }
         return "https://" + region + ".platform.go.gbgplc.com/v2/captain/";
+    }
+
+    /**
+     * {@link #baseUrl} for {@code Go.builder().serverURL(...)}: the full API
+     * base, {@code /v2/captain} included, without the trailing slash (every
+     * operation path starts with one).
+     *
+     * go-core-sdk 0.2.0-alpha02 put {@code /v2/captain} back into its server
+     * URLs and took it out of the operation paths, reversing alpha01. Under
+     * alpha01 this method stripped it; under alpha02 stripping it would send
+     * every call to {@code https://host/journey/...}.
+     */
+    public String sdkServerUrl() {
+        return baseUrl().replaceFirst("/$", "");
     }
 
     public boolean live() {
@@ -131,5 +145,31 @@ public record GoSdkProperties(
             // Fall through — return the configured value as-is.
         }
         return authUrl;
+    }
+
+    /** The one token path the SDK can post to (see the class javadoc). */
+    static final String SDK_TOKEN_PATH = "/as/token.oauth2";
+
+    /**
+     * Why {@link #authUrl} can't be reached through the SDK, or null if it
+     * can. {@link #authServerUrl} drops the path, so a {@code go.auth-url}
+     * with any other path would otherwise be ignored without a word, and
+     * every customer would see "Could not authenticate" at their first screen.
+     * The same check as the TypeScript sibling's {@code authUrlProblem}.
+     */
+    public String authUrlProblem() {
+        String path;
+        try {
+            java.net.URI uri = java.net.URI.create(authUrl);
+            if (uri.getScheme() == null || uri.getHost() == null) {
+                return "go.auth-url \"" + authUrl + "\" is not a valid URL";
+            }
+            path = uri.getPath() == null ? "" : uri.getPath().replaceFirst("/$", "");
+        } catch (IllegalArgumentException e) {
+            return "go.auth-url \"" + authUrl + "\" is not a valid URL";
+        }
+        return SDK_TOKEN_PATH.equals(path) ? null
+                : "go.auth-url path \"" + path + "\" cannot be reached through go-core-sdk, which always posts to "
+                        + SDK_TOKEN_PATH + " (see README, \"Known gaps\" (g))";
     }
 }

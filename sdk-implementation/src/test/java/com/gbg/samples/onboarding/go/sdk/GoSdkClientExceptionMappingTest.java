@@ -1,6 +1,7 @@
 package com.gbg.samples.onboarding.go.sdk;
 
 import com.gbg.gocore.models.errors.APIException;
+import com.gbg.gocore.models.errors.ErrorResponse;
 import com.gbg.samples.onboarding.api.OnboardingException;
 import com.gbg.samples.onboarding.api.dto.ErrorCode;
 import org.junit.jupiter.api.Test;
@@ -87,6 +88,46 @@ class GoSdkClientExceptionMappingTest {
                 () -> client.call(() -> { throw apiException(500); }), OnboardingException.class);
 
         assertThat(ex.code()).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+    }
+
+    /** 0.2.0's typed {@code ErrorResponse} is a {@code GoException} but not an {@link APIException}. */
+    @Test
+    void theTypedErrorResponseIsClassifiedByItsCodeToo() {
+        byte[] body = """
+                {"errors":[{"code":"E1","name":"Invalid","problem":"context.subject.identity.emails.0.email: Invalid email address","action":"Fix it"}]}
+                """.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        OnboardingException notFound = catchThrowableOfType(
+                () -> client.call(() -> { throw new ErrorResponse(404, null, fakeRawResponse(), null, null); }),
+                OnboardingException.class);
+        OnboardingException rejected = catchThrowableOfType(
+                () -> client.call(() -> { throw new ErrorResponse(400, body, fakeRawResponse(), null, null); },
+                        java.util.Map.of("context.subject.identity.emails.0.email", "PersonalEmail/email")),
+                OnboardingException.class);
+
+        assertThat(notFound.code()).isEqualTo(ErrorCode.SESSION_EXPIRED);
+        assertThat(rejected.code()).isEqualTo(ErrorCode.VALIDATION_FAILED);
+        assertThat(rejected.fields()).containsEntry("PersonalEmail/email", "Invalid email address");
+    }
+
+    /**
+     * journey/start has no session behind it, so a 404/410 means the market's
+     * resource id is wrong: not retryable, and not "Your session has ended".
+     */
+    @Test
+    void aStartRefusedWith404Or410IsMisconfiguredAndNotRetryable() {
+        for (int status : new int[]{404, 410}) {
+            OnboardingException ex = catchThrowableOfType(
+                    () -> client.call(() -> { throw apiException(status); }, java.util.Map.of(), GoSdkClient::startRefusal),
+                    OnboardingException.class);
+
+            assertThat(ex.code()).as("status %s", status).isEqualTo(ErrorCode.UPSTREAM_UNAVAILABLE);
+            assertThat(ex.retryable()).as("status %s", status).isFalse();
+        }
+        OnboardingException other = catchThrowableOfType(
+                () -> client.call(() -> { throw apiException(429); }, java.util.Map.of(), GoSdkClient::startRefusal),
+                OnboardingException.class);
+        assertThat(other.code()).isEqualTo(ErrorCode.RATE_LIMITED);
     }
 
     @Test

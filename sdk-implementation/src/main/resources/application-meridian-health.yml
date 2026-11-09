@@ -1,4 +1,4 @@
-﻿server:
+server:
   port: 8092
 
 app:
@@ -10,14 +10,14 @@ app:
   accent-soft: "#C7EBD5"
   help-line: "Reception can verify you in person with the same documents."
   journey-name: Patient record access
-  # Published to Preview on the gbggo4-demo tenant, 2026-09-07. Pinned to an
+  # Published to Preview on the prod tenant, 2026-09-07. Pinned to an
   # exact version rather than @latest: @latest costs a Journey-builder lookup
   # on every start and doesn't pick up a publish predictably.
-  resource-id: b3d149562ec927dedcd76f3a6b7b0f82bbf7de818aebad3b3f7baa4c14940b6b@5ph3fkm5
+  resource-id: d15e58f7988a2cc685e5f581a91e970ca55270b9fe539a8259cb219dd7c1cc7c@3abdwwud
   cors-allowed-origins:
     - http://localhost:3001
 
-# The public GBG Go platform. Still inert unless go.mode=live â€” set that, and
+# The public GBG Go platform. Still inert unless go.mode=live — set that, and
 # the two credentials below, in an untracked .env or via env vars.
 #
 # base-url is regional: swap `eu` for `us` or `au` to match the region your
@@ -27,7 +27,9 @@ app:
 # the password grant, so override auth-url, base-url, grant-type and scope
 # here, and set GBG_USERNAME/GBG_PASSWORD alongside the client credentials --
 # both are already wired to go.username/go.password in application.yml, read
-# only under grant-type: password.
+# only under grant-type: password. The SDK can only post to /as/token.oauth2,
+# so a Keycloak auth-url is logged as misconfigured at startup and the token
+# request must reach Keycloak some other way (README, "Known gaps" (g)).
 go:
   auth-url: https://api.auth.gbgplc.com/as/token.oauth2
   base-url: https://eu.platform.go.gbgplc.com/v2/captain/
@@ -36,18 +38,18 @@ go:
   client-id: ${GBG_CLIENT_ID:}
   client-secret: ${GBG_CLIENT_SECRET:}
 
-# Live-mode screens for this journey (DefaultInteractionMapper): which
+# Live-mode screens for this journey (SdkInteractionMapper): which
 # domain elements map to which screen, in collection order.
 #
-# Written against the journey published on gbggo4-demo
-# (resource b3d1495â€¦@5ph3fkm5) from what a live fetch returns â€” verified
-# 2026-09-10. Stages match against the interaction's `collects` list, which
+# Written from what a live fetch of this journey returns (first verified
+# 2026-09-10 against an earlier publish on gbggo4-demo; the resource above
+# replaced it). Stages match against the interaction's `collects` list, which
 # names 47 refs across seven pages; `outstanding` is the narrower field and
 # omits any element whose parent is optional, so matching on that alone
 # drops pages the journey really has.
 #
-# Order follows the journey's own pages: consent first â€” a patient consents
-# to their record being opened before anything is collected â€” then identity
+# Order follows the journey's own pages: consent first — a patient consents
+# to their record being opened before anything is collected — then identity
 # and contact details, the address, and document before selfie, because
 # Facematch compares the selfie against the anchor image Document
 # Classification produces. Go enforces the module dependency, not the
@@ -90,7 +92,7 @@ screen-plan:
       body: We use this to confirm it is you, and to tell you when your record is ready.
       cta: Continue
     # Fields, types and helper text come from the journey's own `collects`
-    # (DefaultInteractionMapper.fieldsFor), filtered to the required ones â€”
+    # (SdkInteractionMapper.fieldsFor), filtered to the required ones —
     # CurrentAddress alone lists 18 fields, of which 5 are required.
     - name: address
       kind: form
@@ -128,8 +130,8 @@ screen-plan:
         - Facematch Verification
   # The design has three independent toggles; the Consent Collection module
   # records acceptance of one agreement (its only required element is
-  # Consent/url). Only the first gates access â€” a patient who will not share
-  # with clinicians cannot be given a record â€” so that one drives the
+  # Consent/url). Only the first gates access — a patient who will not share
+  # with clinicians cannot be given a record — so that one drives the
   # module, and the other two are recorded as preferences alongside it
   # rather than as separate consent records.
   consent-checks:
