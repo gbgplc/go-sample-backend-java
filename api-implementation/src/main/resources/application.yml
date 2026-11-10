@@ -12,10 +12,12 @@ spring:
   # during a token refresh, which GoTokenService.accessToken() mints while
   # holding a lock) hung the calling thread indefinitely instead of failing
   # fast and letting OnboardingException.upstreamUnavailable do its job.
+  # The read timeout is 30s because a live journey/start regularly took
+  # longer than 15s to answer.
   http:
     client:
       connect-timeout: 5s
-      read-timeout: 15s
+      read-timeout: 30s
   servlet:
     multipart:
       # Boot's own default (1MB) rejects a typical phone photo of a document
