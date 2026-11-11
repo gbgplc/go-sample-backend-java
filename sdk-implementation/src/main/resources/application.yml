@@ -9,11 +9,12 @@ spring:
   # Applies to every auto-configured RestClient.Builder in this module (none
   # currently use one directly, but this keeps parity with api-implementation
   # and covers any future one). The SDK's own HTTP timeout is set separately
-  # — see TimeoutHttpClient.
+  # — see TimeoutHttpClient. Both are 30s: a live journey/start regularly
+  # took longer than 15s to answer.
   http:
     client:
       connect-timeout: 5s
-      read-timeout: 15s
+      read-timeout: 30s
   servlet:
     multipart:
       # Boot's own default (1MB) rejects a typical phone photo of a document

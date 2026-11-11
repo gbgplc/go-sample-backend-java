@@ -32,7 +32,8 @@ import java.time.Duration;
  */
 class TimeoutHttpClient implements HTTPClient {
 
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    /** 30 seconds: a live {@code journey/start} regularly took longer than 15 to answer. */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
     private final HTTPClient delegate;
 
